@@ -54,6 +54,120 @@ function MapCenter({ center }: { center: [number, number] | null }) {
   return null;
 }
 
+// Component for zoom controls
+function ZoomControls({ onFocusAll }: { onFocusAll: () => void }) {
+  const map = useMap();
+  
+  const handleZoomIn = () => {
+    map.zoomIn();
+  };
+  
+  const handleZoomOut = () => {
+    map.zoomOut();
+  };
+  
+  return (
+    <div style={{ 
+      position: 'absolute', 
+      bottom: '24px', 
+      right: '24px', 
+      zIndex: 1000,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '8px'
+    }}>
+      <button
+        onClick={onFocusAll}
+        style={{
+          width: '40px',
+          height: '40px',
+          borderRadius: '8px',
+          backgroundColor: 'white',
+          border: '2px solid #e5e7eb',
+          cursor: 'pointer',
+          fontSize: '18px',
+          boxShadow: '0 2px 6px rgba(0, 0, 0, 0.15)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          transition: 'all 0.2s ease'
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.backgroundColor = '#f3f4f6';
+          e.currentTarget.style.borderColor = '#3b82f6';
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.backgroundColor = 'white';
+          e.currentTarget.style.borderColor = '#e5e7eb';
+        }}
+        title="Focus all trips"
+      >
+        🗺️
+      </button>
+      <button
+        onClick={handleZoomIn}
+        style={{
+          width: '40px',
+          height: '40px',
+          borderRadius: '8px',
+          backgroundColor: 'white',
+          border: '2px solid #e5e7eb',
+          cursor: 'pointer',
+          fontSize: '20px',
+          fontWeight: 'bold',
+          boxShadow: '0 2px 6px rgba(0, 0, 0, 0.15)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          transition: 'all 0.2s ease',
+          color: '#374151'
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.backgroundColor = '#f3f4f6';
+          e.currentTarget.style.borderColor = '#3b82f6';
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.backgroundColor = 'white';
+          e.currentTarget.style.borderColor = '#e5e7eb';
+        }}
+        title="Zoom in"
+      >
+        +
+      </button>
+      <button
+        onClick={handleZoomOut}
+        style={{
+          width: '40px',
+          height: '40px',
+          borderRadius: '8px',
+          backgroundColor: 'white',
+          border: '2px solid #e5e7eb',
+          cursor: 'pointer',
+          fontSize: '20px',
+          fontWeight: 'bold',
+          boxShadow: '0 2px 6px rgba(0, 0, 0, 0.15)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          transition: 'all 0.2s ease',
+          color: '#374151'
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.backgroundColor = '#f3f4f6';
+          e.currentTarget.style.borderColor = '#3b82f6';
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.backgroundColor = 'white';
+          e.currentTarget.style.borderColor = '#e5e7eb';
+        }}
+        title="Zoom out"
+      >
+        −
+      </button>
+    </div>
+  );
+}
+
 function App() {
   const [routes, setRoutes] = useState<MasterRoute[]>([]);
   const [activeTrips, setActiveTrips] = useState<Map<string, ActiveTrip>>(new Map());
@@ -312,6 +426,11 @@ function App() {
     }
   };
 
+  const focusAllTrips = () => {
+    setIsManualFocus(false);
+    setMapCenter(null);
+  };
+
   return (
     <div style={{ display: 'flex', width: '100vw', height: '100vh', overflow: 'hidden', fontFamily: 'system-ui, sans-serif' }}>
       <div style={{ flex: 1, position: 'relative', backgroundColor: '#e5e7eb' }}>
@@ -327,6 +446,7 @@ function App() {
           />
           {allPoints.length > 0 && <MapBounds allPoints={allPoints} disabled={isManualFocus} />}
           <MapCenter center={mapCenter} />
+          <ZoomControls onFocusAll={focusAllTrips} />
           
           {/* Render all trip polylines and markers */}
           {Array.from(activeTrips.values()).map((trip) => (
