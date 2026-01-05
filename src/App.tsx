@@ -1,9 +1,8 @@
-import { useEffect, useState, useRef, useCallback } from 'react';
+import { useEffect, useState } from 'react';
 import { MapContainer, TileLayer, Polyline, CircleMarker, useMap } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import { supabase, type MasterRoute } from './lib/supabase';
-import { decodePolyline, calculateTimePerPoint, type LatLng } from './lib/polylineUtils';
-import type { Trip } from './lib/types';
+import { decodePolyline, calculateTimePerPoint, formatDuration, type LatLng } from './lib/polylineUtils';
 
 const defaultCenter: [number, number] = [6.9271, 79.8612];
 const MAX_TRIPS = 10;
@@ -29,15 +28,28 @@ const TRIP_COLORS = [
 ];
 
 // Component to handle map bounds fitting
-function MapBounds({ allPoints }: { allPoints: LatLng[] }) {
+function MapBounds({ allPoints, disabled }: { allPoints: LatLng[], disabled: boolean }) {
   const map = useMap();
   
   useEffect(() => {
-    if (allPoints.length > 0) {
+    if (allPoints.length > 0 && !disabled) {
       const bounds = allPoints.map(p => [p.lat, p.lng] as [number, number]);
       map.fitBounds(bounds);
     }
-  }, [allPoints, map]);
+  }, [allPoints, map, disabled]);
+  
+  return null;
+}
+
+// Component to handle map centering
+function MapCenter({ center }: { center: [number, number] | null }) {
+  const map = useMap();
+  
+  useEffect(() => {
+    if (center) {
+      map.setView(center, 15);
+    }
+  }, [center, map]);
   
   return null;
 }
@@ -47,6 +59,8 @@ function App() {
   const [activeTrips, setActiveTrips] = useState<Map<string, ActiveTrip>>(new Map());
   const [selectedRouteId, setSelectedRouteId] = useState<string>('');
   const [selectedSpeedMultiplier, setSelectedSpeedMultiplier] = useState<SpeedMultiplier>(1);
+  const [mapCenter, setMapCenter] = useState<[number, number] | null>(null);
+  const [isManualFocus, setIsManualFocus] = useState(false);
 
   useEffect(() => {
     const fetchRoutes = async () => {
@@ -286,9 +300,17 @@ function App() {
       setTimeout(() => startAnimation(tripId), 100);
     }
   };
-
   // Get all points from all trips for map bounds
   const allPoints = Array.from(activeTrips.values()).flatMap(trip => trip.decodedPoints);
+  
+  const focusOnTrip = (tripId: string) => {
+    const trip = activeTrips.get(tripId);
+    if (trip) {
+      const currentPoint = trip.decodedPoints[trip.currentPointIndex];
+      setMapCenter([currentPoint.lat, currentPoint.lng]);
+      setIsManualFocus(true);
+    }
+  };
 
   return (
     <div style={{ display: 'flex', width: '100vw', height: '100vh', overflow: 'hidden', fontFamily: 'system-ui, sans-serif' }}>
@@ -303,7 +325,8 @@ function App() {
             attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
             url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
           />
-          {allPoints.length > 0 && <MapBounds allPoints={allPoints} />}
+          {allPoints.length > 0 && <MapBounds allPoints={allPoints} disabled={isManualFocus} />}
+          <MapCenter center={mapCenter} />
           
           {/* Render all trip polylines and markers */}
           {Array.from(activeTrips.values()).map((trip) => (
@@ -328,6 +351,49 @@ function App() {
             </div>
           ))}
         </MapContainer>
+        
+        {/* Current Location Indicators */}
+        <div style={{ position: 'absolute', top: '16px', left: '16px', zIndex: 1000, display: 'flex', flexDirection: 'column', gap: '8px', maxWidth: '320px' }}>
+          {Array.from(activeTrips.values()).map((trip) => {
+            const currentPoint = trip.decodedPoints[trip.currentPointIndex];
+            if (!currentPoint) return null;
+            
+            return (
+              <div
+                key={`indicator-${trip.tripId}`}
+                style={{
+                  backgroundColor: 'white',
+                  borderRadius: '8px',
+                  boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15)',
+                  padding: '12px 16px',
+                  borderLeft: `4px solid ${trip.color}`,
+                  cursor: 'pointer'
+                }}
+                onClick={() => focusOnTrip(trip.tripId)}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                  <div style={{ 
+                    width: '16px', 
+                    height: '16px', 
+                    borderRadius: '50%', 
+                    backgroundColor: trip.color,
+                    border: '2px solid white',
+                    boxShadow: '0 1px 3px rgba(0, 0, 0, 0.3)'
+                  }} />
+                  <div style={{ fontSize: '14px', fontWeight: 'bold', color: '#1f2937' }}>
+                    {trip.routeName}
+                  </div>
+                </div>
+                <div style={{ fontSize: '12px', color: '#6b7280', marginLeft: '18px' }}>
+                  <div>Point {trip.currentPointIndex + 1} of {trip.decodedPoints.length}</div>
+                  <div style={{ fontSize: '11px', fontFamily: 'monospace', marginTop: '2px', color: '#9ca3af' }}>
+                    {currentPoint.lat.toFixed(6)}, {currentPoint.lng.toFixed(6)}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
       </div>
       
       <div style={{ width: '450px', backgroundColor: 'white', boxShadow: '-4px 0 6px -1px rgba(0, 0, 0, 0.1)', overflowY: 'auto', height: '100vh', padding: '24px' }}>
@@ -411,6 +477,10 @@ function App() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
           {Array.from(activeTrips.values()).map((trip) => {
             const progress = ((trip.currentPointIndex / (trip.decodedPoints.length - 1)) * 100).toFixed(1);
+            const remainingPoints = trip.decodedPoints.length - trip.currentPointIndex - 1;
+            const remainingMinutes = (remainingPoints * calculateTimePerPoint(trip.estimatedDuration, trip.decodedPoints.length)) / (60 * 1000 * trip.speedMultiplier);
+            const totalDurationAtSpeed = trip.estimatedDuration / trip.speedMultiplier;
+            
             return (
               <div
                 key={trip.tripId}
@@ -425,12 +495,38 @@ function App() {
                   <h3 style={{ fontSize: '16px', fontWeight: 'bold', color: '#1f2937', margin: 0 }}>
                     {trip.routeName}
                   </h3>
-                  <div style={{ width: '16px', height: '16px', borderRadius: '50%', backgroundColor: trip.color }} />
+                  <button
+                    onClick={() => focusOnTrip(trip.tripId)}
+                    style={{
+                      width: '32px',
+                      height: '32px',
+                      borderRadius: '50%',
+                      backgroundColor: trip.color,
+                      border: '3px solid white',
+                      boxShadow: '0 2px 6px rgba(0, 0, 0, 0.2)',
+                      cursor: 'pointer',
+                      transition: 'transform 0.2s ease'
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.transform = 'scale(1.1)';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.transform = 'scale(1)';
+                    }}
+                  />
                 </div>
 
-                <p style={{ fontSize: '12px', color: '#6b7280', marginBottom: '8px' }}>
-                  Point {trip.currentPointIndex + 1} of {trip.decodedPoints.length}
-                </p>
+                <div style={{ fontSize: '12px', color: '#6b7280', marginBottom: '8px' }}>
+                  <p style={{ margin: '2px 0' }}>Point {trip.currentPointIndex + 1} of {trip.decodedPoints.length}</p>
+                  <p style={{ margin: '2px 0', fontWeight: '600', color: '#374151' }}>
+                    {trip.isAnimating 
+                      ? `⏱️ ${formatDuration(remainingMinutes)} remaining` 
+                      : `⏱️ ${formatDuration(totalDurationAtSpeed)} total duration`}
+                  </p>
+                  <p style={{ margin: '2px 0', fontSize: '11px', color: '#9ca3af' }}>
+                    ({formatDuration(trip.estimatedDuration)} at 1x speed)
+                  </p>
+                </div>
 
                 <div style={{ width: '100%', backgroundColor: '#e5e7eb', borderRadius: '9999px', height: '8px', marginBottom: '12px' }}>
                   <div
@@ -481,6 +577,48 @@ function App() {
                     }}
                   >
                     {trip.isAnimating ? '⏸ Stop' : '▶ Start'}
+                  </button>
+                  <button
+                    onClick={() => {
+                      stopAnimation(trip.tripId);
+                      setActiveTrips(prev => {
+                        const updated = new Map(prev);
+                        const currentTrip = updated.get(trip.tripId);
+                        if (currentTrip) {
+                          updated.set(trip.tripId, {
+                            ...currentTrip,
+                            currentPointIndex: 0,
+                            isAnimating: false
+                          });
+                        }
+                        return updated;
+                      });
+                      // Update database
+                      const firstPoint = trip.decodedPoints[0];
+                      supabase
+                        .from('current_locations')
+                        .update({
+                          current_point_index: 0,
+                          current_latitude: firstPoint.lat,
+                          current_longitude: firstPoint.lng,
+                          progress_percentage: 0,
+                          is_animating: false
+                        })
+                        .eq('trip_id', trip.tripId);
+                    }}
+                    style={{
+                      width: '100%',
+                      padding: '10px',
+                      borderRadius: '8px',
+                      fontWeight: '600',
+                      fontSize: '14px',
+                      color: '#374151',
+                      backgroundColor: '#e5e7eb',
+                      border: 'none',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    <span style={{ fontSize: '18px' }}>↻</span> Reset
                   </button>
                   <button
                     onClick={() => {
