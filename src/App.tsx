@@ -1,38 +1,52 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { MapContainer, TileLayer, Polyline, CircleMarker, useMap } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import { supabase, type MasterRoute } from './lib/supabase';
-import { decodePolyline, calculateTimePerPoint, formatDuration, type LatLng } from './lib/polylineUtils';
+import { decodePolyline, calculateTimePerPoint, type LatLng } from './lib/polylineUtils';
+import type { Trip } from './lib/types';
 
 const defaultCenter: [number, number] = [6.9271, 79.8612];
+const MAX_TRIPS = 10;
 
 type SpeedMultiplier = 1 | 2 | 3 | 5 | 10 | 20;
 
+interface ActiveTrip {
+  tripId: string;
+  routeId: string;
+  routeName: string;
+  decodedPoints: LatLng[];
+  currentPointIndex: number;
+  isAnimating: boolean;
+  speedMultiplier: SpeedMultiplier;
+  estimatedDuration: number;
+  intervalRef: ReturnType<typeof setInterval> | null;
+  color: string;
+}
+
+const TRIP_COLORS = [
+  '#EF4444', '#3B82F6', '#10B981', '#F59E0B', '#8B5CF6',
+  '#EC4899', '#14B8A6', '#F97316', '#6366F1', '#84CC16'
+];
+
 // Component to handle map bounds fitting
-function MapBounds({ points }: { points: LatLng[] }) {
+function MapBounds({ allPoints }: { allPoints: LatLng[] }) {
   const map = useMap();
   
   useEffect(() => {
-    if (points.length > 0) {
-      const bounds = points.map(p => [p.lat, p.lng] as [number, number]);
+    if (allPoints.length > 0) {
+      const bounds = allPoints.map(p => [p.lat, p.lng] as [number, number]);
       map.fitBounds(bounds);
     }
-  }, [points, map]);
+  }, [allPoints, map]);
   
   return null;
 }
 
 function App() {
   const [routes, setRoutes] = useState<MasterRoute[]>([]);
-  const [route, setRoute] = useState<MasterRoute | null>(null);
+  const [activeTrips, setActiveTrips] = useState<Map<string, ActiveTrip>>(new Map());
   const [selectedRouteId, setSelectedRouteId] = useState<string>('');
-  const [decodedPoints, setDecodedPoints] = useState<LatLng[]>([]);
-  const [currentPointIndex, setCurrentPointIndex] = useState<number>(0);
-  const [isAnimating, setIsAnimating] = useState(false);
-  const [speedMultiplier, setSpeedMultiplier] = useState<SpeedMultiplier>(1);
-  const [estimatedDuration, setEstimatedDuration] = useState<number>(0);
-  
-  const animationIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [selectedSpeedMultiplier, setSelectedSpeedMultiplier] = useState<SpeedMultiplier>(1);
 
   useEffect(() => {
     const fetchRoutes = async () => {
@@ -49,99 +63,232 @@ function App() {
 
         if (data && data.length > 0) {
           setRoutes(data);
-          // Auto-select first route
           setSelectedRouteId(data[0].id);
-          loadRoute(data[0]);
         }
       } catch (err) {
         console.error('Fetch error:', err);
       }
     };
     fetchRoutes();
-  }, []);
 
-  const loadRoute = (routeData: MasterRoute) => {
-    setRoute(routeData);
-    let polyline = routeData.encoded_polyline;
-    if (polyline.includes('\\\\')) {
-      polyline = polyline.replace(/\\\\/g, '\\');
-    }
-    const points = decodePolyline(polyline);
-    setDecodedPoints(points);
-    setEstimatedDuration(routeData.estimated_duration_minutes || 210);
-    setCurrentPointIndex(0);
-    stopAnimation();
-  };
-
-  const handleRouteChange = (routeId: string) => {
-    setSelectedRouteId(routeId);
-    const selectedRoute = routes.find(r => r.id === routeId);
-    if (selectedRoute) {
-      loadRoute(selectedRoute);
-    }
-  };
-
-  const startAnimation = () => {
-    if (decodedPoints.length === 0) return;
-    setIsAnimating(true);
-    setCurrentPointIndex(0);
-    const timePerPoint = calculateTimePerPoint(estimatedDuration, decodedPoints.length);
-    const adjustedTime = timePerPoint / speedMultiplier;
-    let index = 0;
-    animationIntervalRef.current = setInterval(() => {
-      index++;
-      if (index >= decodedPoints.length) {
-        stopAnimation();
-        return;
-      }
-      setCurrentPointIndex(index);
-    }, adjustedTime);
-  };
-
-  const stopAnimation = () => {
-    if (animationIntervalRef.current) {
-      clearInterval(animationIntervalRef.current);
-      animationIntervalRef.current = null;
-    }
-    setIsAnimating(false);
-  };
-
-  const resetAnimation = () => {
-    stopAnimation();
-    setCurrentPointIndex(0);
-  };
-
-  useEffect(() => {
+    // Cleanup: stop all animations on unmount
     return () => {
-      if (animationIntervalRef.current) {
-        clearInterval(animationIntervalRef.current);
-      }
+      activeTrips.forEach(trip => {
+        if (trip.intervalRef) {
+          clearInterval(trip.intervalRef);
+        }
+      });
     };
   }, []);
 
-  useEffect(() => {
-    if (isAnimating) {
-      const currentIndex = currentPointIndex;
-      stopAnimation();
-      const timePerPoint = calculateTimePerPoint(estimatedDuration, decodedPoints.length);
-      const adjustedTime = timePerPoint / speedMultiplier;
-      let index = currentIndex;
-      animationIntervalRef.current = setInterval(() => {
-        index++;
-        if (index >= decodedPoints.length) {
-          stopAnimation();
-          return;
-        }
-        setCurrentPointIndex(index);
-      }, adjustedTime);
+  const createTrip = async () => {
+    if (activeTrips.size >= MAX_TRIPS) {
+      alert(`Maximum ${MAX_TRIPS} trips allowed!`);
+      return;
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [speedMultiplier]);
 
-  const currentPoint = decodedPoints[currentPointIndex];
-  const progress = decodedPoints.length > 0 
-    ? ((currentPointIndex / (decodedPoints.length - 1)) * 100).toFixed(1)
-    : 0;
+    if (!selectedRouteId) {
+      alert('Please select a route');
+      return;
+    }
+
+    const selectedRoute = routes.find(r => r.id === selectedRouteId);
+    if (!selectedRoute) return;
+
+    try {
+      // Decode polyline
+      let polyline = selectedRoute.encoded_polyline;
+      if (polyline.includes('\\\\')) {
+        polyline = polyline.replace(/\\\\/g, '\\');
+      }
+      const points = decodePolyline(polyline);
+
+      if (points.length === 0) {
+        alert('Invalid route data');
+        return;
+      }
+
+      const firstPoint = points[0];
+      
+      // Create trip in database
+      const { data: tripData, error } = await supabase
+        .from('current_locations')
+        .insert({
+          route_id: selectedRoute.id,
+          route_name: selectedRoute.route_name,
+          current_point_index: 0,
+          current_latitude: firstPoint.lat,
+          current_longitude: firstPoint.lng,
+          total_points: points.length,
+          speed_multiplier: selectedSpeedMultiplier,
+          is_animating: false,
+          progress_percentage: 0
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      // Create active trip object
+      const newTrip: ActiveTrip = {
+        tripId: tripData.trip_id,
+        routeId: selectedRoute.id,
+        routeName: selectedRoute.route_name,
+        decodedPoints: points,
+        currentPointIndex: 0,
+        isAnimating: false,
+        speedMultiplier: selectedSpeedMultiplier,
+        estimatedDuration: selectedRoute.estimated_duration_minutes || 210,
+        intervalRef: null,
+        color: TRIP_COLORS[activeTrips.size % TRIP_COLORS.length]
+      };
+
+      setActiveTrips(new Map(activeTrips.set(tripData.trip_id, newTrip)));
+    } catch (err) {
+      console.error('Error creating trip:', err);
+      alert('Failed to create trip');
+    }
+  };
+
+  const startAnimation = (tripId: string) => {
+    const trip = activeTrips.get(tripId);
+    if (!trip || trip.isAnimating) return;
+
+    const timePerPoint = calculateTimePerPoint(trip.estimatedDuration, trip.decodedPoints.length);
+    const adjustedTime = timePerPoint / trip.speedMultiplier;
+    let index = trip.currentPointIndex;
+
+    const intervalRef = setInterval(async () => {
+      index++;
+      if (index >= trip.decodedPoints.length) {
+        stopAnimation(tripId);
+        return;
+      }
+
+      const currentPoint = trip.decodedPoints[index];
+      const progress = ((index / (trip.decodedPoints.length - 1)) * 100).toFixed(2);
+
+      // Update database
+      await supabase
+        .from('current_locations')
+        .update({
+          current_point_index: index,
+          current_latitude: currentPoint.lat,
+          current_longitude: currentPoint.lng,
+          progress_percentage: parseFloat(progress),
+          is_animating: true
+        })
+        .eq('trip_id', tripId);
+
+      // Update local state
+      setActiveTrips(prev => {
+        const updated = new Map(prev);
+        const currentTrip = updated.get(tripId);
+        if (currentTrip) {
+          updated.set(tripId, {
+            ...currentTrip,
+            currentPointIndex: index,
+            isAnimating: true
+          });
+        }
+        return updated;
+      });
+    }, adjustedTime);
+
+    setActiveTrips(prev => {
+      const updated = new Map(prev);
+      const currentTrip = updated.get(tripId);
+      if (currentTrip) {
+        updated.set(tripId, {
+          ...currentTrip,
+          intervalRef,
+          isAnimating: true
+        });
+      }
+      return updated;
+    });
+  };
+
+  const stopAnimation = (tripId: string) => {
+    const trip = activeTrips.get(tripId);
+    if (!trip) return;
+
+    if (trip.intervalRef) {
+      clearInterval(trip.intervalRef);
+    }
+
+    // Update database
+    supabase
+      .from('current_locations')
+      .update({ is_animating: false })
+      .eq('trip_id', tripId);
+
+    setActiveTrips(prev => {
+      const updated = new Map(prev);
+      const currentTrip = updated.get(tripId);
+      if (currentTrip) {
+        updated.set(tripId, {
+          ...currentTrip,
+          intervalRef: null,
+          isAnimating: false
+        });
+      }
+      return updated;
+    });
+  };
+
+  const deleteTrip = async (tripId: string) => {
+    stopAnimation(tripId);
+    
+    // Delete from database
+    await supabase
+      .from('current_locations')
+      .delete()
+      .eq('trip_id', tripId);
+
+    setActiveTrips(prev => {
+      const updated = new Map(prev);
+      updated.delete(tripId);
+      return updated;
+    });
+  };
+
+  const updateTripSpeed = async (tripId: string, newSpeed: SpeedMultiplier) => {
+    const trip = activeTrips.get(tripId);
+    if (!trip) return;
+
+    const wasAnimating = trip.isAnimating;
+    
+    if (wasAnimating) {
+      stopAnimation(tripId);
+    }
+
+    // Update database
+    await supabase
+      .from('current_locations')
+      .update({ speed_multiplier: newSpeed })
+      .eq('trip_id', tripId);
+
+    setActiveTrips(prev => {
+      const updated = new Map(prev);
+      const currentTrip = updated.get(tripId);
+      if (currentTrip) {
+        updated.set(tripId, {
+          ...currentTrip,
+          speedMultiplier: newSpeed
+        });
+      }
+      return updated;
+    });
+
+    if (wasAnimating) {
+      // Restart animation with new speed
+      setTimeout(() => startAnimation(tripId), 100);
+    }
+  };
+
+  // Get all points from all trips for map bounds
+  const allPoints = Array.from(activeTrips.values()).flatMap(trip => trip.decodedPoints);
 
   return (
     <div style={{ display: 'flex', width: '100vw', height: '100vh', overflow: 'hidden', fontFamily: 'system-ui, sans-serif' }}>
@@ -156,126 +303,226 @@ function App() {
             attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
             url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
           />
-          {decodedPoints.length > 0 && (
-            <>
-              <MapBounds points={decodedPoints} />
+          {allPoints.length > 0 && <MapBounds allPoints={allPoints} />}
+          
+          {/* Render all trip polylines and markers */}
+          {Array.from(activeTrips.values()).map((trip) => (
+            <div key={trip.tripId}>
               <Polyline 
-                positions={decodedPoints.map(p => [p.lat, p.lng] as [number, number])} 
-                pathOptions={{ color: '#3B82F6', weight: 4, opacity: 0.8 }}
+                positions={trip.decodedPoints.map(p => [p.lat, p.lng] as [number, number])} 
+                pathOptions={{ color: trip.color, weight: 3, opacity: 0.6 }}
               />
-              {decodedPoints.map((point, index) => (
+              {trip.decodedPoints.map((point, index) => (
                 <CircleMarker
-                  key={index}
+                  key={`${trip.tripId}-${index}`}
                   center={[point.lat, point.lng]}
-                  radius={index === currentPointIndex ? 8 : 4}
+                  radius={index === trip.currentPointIndex ? 10 : 3}
                   pathOptions={{
-                    fillColor: index === currentPointIndex ? '#EF4444' : '#60A5FA',
-                    fillOpacity: index === currentPointIndex ? 1 : 0.7,
+                    fillColor: index === trip.currentPointIndex ? trip.color : trip.color,
+                    fillOpacity: index === trip.currentPointIndex ? 1 : 0.4,
                     color: '#FFFFFF',
-                    weight: index === currentPointIndex ? 3 : 1
+                    weight: index === trip.currentPointIndex ? 3 : 1
                   }}
                 />
               ))}
-            </>
-          )}
+            </div>
+          ))}
         </MapContainer>
-        {currentPoint && route && (
-          <div style={{ position: 'absolute', top: '16px', left: '50%', transform: 'translateX(-50%)', backgroundColor: 'white', borderRadius: '8px', boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.1)', padding: '16px', zIndex: 1000 }}>
-            <div style={{ textAlign: 'center' }}>
-              <div style={{ fontSize: '14px', color: '#6b7280', marginBottom: '4px' }}>Current Point</div>
-              <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#ef4444' }}>Point {currentPointIndex + 1}</div>
-              <div style={{ fontSize: '12px', color: '#4b5563', marginTop: '8px' }}>{currentPoint.lat.toFixed(6)}, {currentPoint.lng.toFixed(6)}</div>
-            </div>
-          </div>
-        )}
       </div>
-      <div style={{ width: '384px', backgroundColor: 'white', boxShadow: '-4px 0 6px -1px rgba(0, 0, 0, 0.1)', overflowY: 'auto', height: '100vh', padding: '24px' }}>
-        {routes.length > 0 && (
-          <div style={{ marginBottom: '24px' }}>
-            <label htmlFor="route-select" style={{ display: 'block', fontSize: '14px', fontWeight: '600', marginBottom: '8px', color: '#374151' }}>
-              Select Route
-            </label>
-            <select
-              id="route-select"
-              value={selectedRouteId}
-              onChange={(e) => handleRouteChange(e.target.value)}
-              style={{
-                width: '100%',
-                padding: '10px 12px',
-                borderRadius: '8px',
-                border: '2px solid #e5e7eb',
-                fontSize: '14px',
-                fontWeight: '500',
-                color: '#1f2937',
-                backgroundColor: 'white',
-                cursor: 'pointer',
-                outline: 'none'
-              }}
-            >
-              {routes.map((r) => (
-                <option key={r.id} value={r.id}>
-                  #{r.route_number} - {r.route_name}
-                </option>
-              ))}
-            </select>
-          </div>
-        )}
-        {route && (
-          <div style={{ marginBottom: '24px' }}>
-            <h1 style={{ fontSize: '24px', fontWeight: 'bold', color: '#1f2937', marginBottom: '8px' }}>{route.route_name}</h1>
-            <div style={{ fontSize: '14px', color: '#4b5563' }}>
-              <p style={{ marginBottom: '4px' }}><b>Route:</b> #{route.route_number}</p>
-              <p style={{ marginBottom: '4px' }}><b>From:</b> {route.origin_city}</p>
-              <p style={{ marginBottom: '4px' }}><b>To:</b> {route.destination_city}</p>
-              <p style={{ marginBottom: '4px' }}><b>Distance:</b> {route.total_distance_km} km</p>
-              <p style={{ marginBottom: '4px' }}><b>Duration:</b> {formatDuration(estimatedDuration)}</p>
-              <p style={{ marginBottom: '4px' }}><b>Total Points:</b> {decodedPoints.length}</p>
-            </div>
-          </div>
-        )}
-        <div style={{ marginBottom: '24px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-            <span style={{ fontSize: '14px', fontWeight: '600' }}>Progress</span>
-            <span style={{ fontSize: '14px' }}>{progress}%</span>
-          </div>
-          <div style={{ width: '100%', backgroundColor: '#e5e7eb', borderRadius: '9999px', height: '12px' }}>
-            <div style={{ backgroundColor: '#3b82f6', height: '12px', borderRadius: '9999px', width: `${progress}%` }} />
-          </div>
-          <div style={{ fontSize: '12px', color: '#6b7280', marginTop: '4px' }}>Point {currentPointIndex + 1} of {decodedPoints.length}</div>
-        </div>
-        <div style={{ marginBottom: '24px' }}>
-          <button onClick={isAnimating ? stopAnimation : startAnimation} style={{ width: '100%', padding: '12px 16px', borderRadius: '8px', fontWeight: '600', color: 'white', backgroundColor: isAnimating ? '#ef4444' : '#3b82f6', border: 'none', cursor: 'pointer', marginBottom: '12px', fontSize: '16px' }}>
-            {isAnimating ? 'Stop' : 'Start Animation'}
-          </button>
-          <button onClick={resetAnimation} style={{ width: '100%', padding: '12px 16px', borderRadius: '8px', fontWeight: '600', color: '#374151', backgroundColor: '#e5e7eb', border: 'none', cursor: 'pointer', fontSize: '16px' }}>
-            Reset
-          </button>
-        </div>
-        <div style={{ marginBottom: '24px' }}>
-          <div style={{ fontSize: '14px', fontWeight: '600', marginBottom: '12px' }}>Animation Speed</div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px' }}>
+      
+      <div style={{ width: '450px', backgroundColor: 'white', boxShadow: '-4px 0 6px -1px rgba(0, 0, 0, 0.1)', overflowY: 'auto', height: '100vh', padding: '24px' }}>
+        {/* Create New Trip Section */}
+        <div style={{ marginBottom: '24px', padding: '16px', backgroundColor: '#f9fafb', borderRadius: '8px', border: '2px solid #e5e7eb' }}>
+          <h2 style={{ fontSize: '18px', fontWeight: 'bold', marginBottom: '12px', color: '#1f2937' }}>
+            Create New Trip ({activeTrips.size}/{MAX_TRIPS})
+          </h2>
+          
+          <label style={{ display: 'block', fontSize: '14px', fontWeight: '600', marginBottom: '8px', color: '#374151' }}>
+            Select Route
+          </label>
+          <select
+            value={selectedRouteId}
+            onChange={(e) => setSelectedRouteId(e.target.value)}
+            style={{
+              width: '100%',
+              padding: '10px 12px',
+              borderRadius: '8px',
+              border: '2px solid #e5e7eb',
+              fontSize: '14px',
+              marginBottom: '12px',
+              cursor: 'pointer'
+            }}
+          >
+            {routes.map((r) => (
+              <option key={r.id} value={r.id}>
+                #{r.route_number} - {r.route_name}
+              </option>
+            ))}
+          </select>
+
+          <label style={{ display: 'block', fontSize: '14px', fontWeight: '600', marginBottom: '8px', color: '#374151' }}>
+            Animation Speed
+          </label>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px', marginBottom: '12px' }}>
             {([1, 2, 3, 5, 10, 20] as SpeedMultiplier[]).map((speed) => (
-              <button key={speed} onClick={() => setSpeedMultiplier(speed)} style={{ padding: '8px 12px', borderRadius: '8px', fontWeight: '600', backgroundColor: speedMultiplier === speed ? '#3b82f6' : '#f3f4f6', color: speedMultiplier === speed ? 'white' : '#374151', border: 'none', cursor: 'pointer', fontSize: '14px' }}>
+              <button
+                key={speed}
+                onClick={() => setSelectedSpeedMultiplier(speed)}
+                style={{
+                  padding: '8px',
+                  borderRadius: '8px',
+                  fontWeight: '600',
+                  fontSize: '14px',
+                  backgroundColor: selectedSpeedMultiplier === speed ? '#3b82f6' : '#ffffff',
+                  color: selectedSpeedMultiplier === speed ? 'white' : '#374151',
+                  border: '2px solid ' + (selectedSpeedMultiplier === speed ? '#3b82f6' : '#e5e7eb'),
+                  cursor: 'pointer'
+                }}
+              >
                 {speed}x
               </button>
             ))}
           </div>
+
+          <button
+            onClick={createTrip}
+            disabled={activeTrips.size >= MAX_TRIPS}
+            style={{
+              width: '100%',
+              padding: '12px 16px',
+              borderRadius: '8px',
+              fontWeight: '600',
+              color: 'white',
+              backgroundColor: activeTrips.size >= MAX_TRIPS ? '#9ca3af' : '#10b981',
+              border: 'none',
+              cursor: activeTrips.size >= MAX_TRIPS ? 'not-allowed' : 'pointer',
+              fontSize: '16px'
+            }}
+          >
+            ➕ Create Trip
+          </button>
         </div>
-        <div>
-          <h2 style={{ fontSize: '18px', fontWeight: 'bold', marginBottom: '12px' }}>All Locations ({decodedPoints.length})</h2>
-          <div style={{ maxHeight: '384px', overflowY: 'auto' }}>
-            {decodedPoints.map((point, index) => (
-              <div key={index} style={{ padding: '8px', borderRadius: '4px', fontSize: '13px', fontFamily: 'monospace', marginBottom: '4px', backgroundColor: index === currentPointIndex ? '#fee2e2' : '#f9fafb', border: index === currentPointIndex ? '2px solid #ef4444' : 'none', fontWeight: index === currentPointIndex ? 'bold' : 'normal' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                  <span style={{ color: '#6b7280' }}>#{index + 1}</span>
-                  <div style={{ textAlign: 'right' }}>
-                    <div>{point.lat.toFixed(6)}</div>
-                    <div>{point.lng.toFixed(6)}</div>
-                  </div>
+
+        {/* Active Trips List */}
+        <h2 style={{ fontSize: '18px', fontWeight: 'bold', marginBottom: '12px', color: '#1f2937' }}>
+          Active Trips ({activeTrips.size})
+        </h2>
+        
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          {Array.from(activeTrips.values()).map((trip) => {
+            const progress = ((trip.currentPointIndex / (trip.decodedPoints.length - 1)) * 100).toFixed(1);
+            return (
+              <div
+                key={trip.tripId}
+                style={{
+                  padding: '16px',
+                  borderRadius: '8px',
+                  border: `3px solid ${trip.color}`,
+                  backgroundColor: '#ffffff'
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                  <h3 style={{ fontSize: '16px', fontWeight: 'bold', color: '#1f2937', margin: 0 }}>
+                    {trip.routeName}
+                  </h3>
+                  <div style={{ width: '16px', height: '16px', borderRadius: '50%', backgroundColor: trip.color }} />
+                </div>
+
+                <p style={{ fontSize: '12px', color: '#6b7280', marginBottom: '8px' }}>
+                  Point {trip.currentPointIndex + 1} of {trip.decodedPoints.length}
+                </p>
+
+                <div style={{ width: '100%', backgroundColor: '#e5e7eb', borderRadius: '9999px', height: '8px', marginBottom: '12px' }}>
+                  <div
+                    style={{
+                      backgroundColor: trip.color,
+                      height: '8px',
+                      borderRadius: '9999px',
+                      width: `${progress}%`,
+                      transition: 'width 0.3s ease'
+                    }}
+                  />
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px', marginBottom: '12px' }}>
+                  {([1, 2, 3, 5, 10, 20] as SpeedMultiplier[]).map((speed) => (
+                    <button
+                      key={speed}
+                      onClick={() => updateTripSpeed(trip.tripId, speed)}
+                      style={{
+                        padding: '6px',
+                        borderRadius: '6px',
+                        fontWeight: '600',
+                        fontSize: '12px',
+                        backgroundColor: trip.speedMultiplier === speed ? trip.color : '#f3f4f6',
+                        color: trip.speedMultiplier === speed ? 'white' : '#374151',
+                        border: 'none',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      {speed}x
+                    </button>
+                  ))}
+                </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  <button
+                    onClick={() => trip.isAnimating ? stopAnimation(trip.tripId) : startAnimation(trip.tripId)}
+                    style={{
+                      width: '100%',
+                      padding: '10px',
+                      borderRadius: '8px',
+                      fontWeight: '600',
+                      fontSize: '14px',
+                      color: 'white',
+                      backgroundColor: trip.isAnimating ? '#ef4444' : '#3b82f6',
+                      border: 'none',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    {trip.isAnimating ? '⏸ Stop' : '▶ Start'}
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (window.confirm(`Delete trip: ${trip.routeName}?`)) {
+                        deleteTrip(trip.tripId);
+                      }
+                    }}
+                    style={{
+                      width: '100%',
+                      padding: '10px',
+                      borderRadius: '8px',
+                      fontWeight: '600',
+                      fontSize: '14px',
+                      color: '#ef4444',
+                      backgroundColor: '#fee2e2',
+                      border: '2px solid #fecaca',
+                      cursor: 'pointer',
+                      transition: 'all 0.2s ease'
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.backgroundColor = '#ef4444';
+                      e.currentTarget.style.color = 'white';
+                      e.currentTarget.style.borderColor = '#ef4444';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.backgroundColor = '#fee2e2';
+                      e.currentTarget.style.color = '#ef4444';
+                      e.currentTarget.style.borderColor = '#fecaca';
+                    }}
+                  >
+                    Delete Trip
+                  </button>
                 </div>
               </div>
-            ))}
-          </div>
+            );
+          })}
+          
+          {activeTrips.size === 0 && (
+            <div style={{ textAlign: 'center', padding: '32px', color: '#9ca3af' }}>
+              <p style={{ fontSize: '14px' }}>No active trips. Create one to get started!</p>
+            </div>
+          )}
         </div>
       </div>
     </div>
