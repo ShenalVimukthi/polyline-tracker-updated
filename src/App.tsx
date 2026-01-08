@@ -250,6 +250,7 @@ function App() {
   const [dragStart, setDragStart] = useState<LatLng | null>(null);
   const [dragCurrent, setDragCurrent] = useState<LatLng | null>(null);
   const [selectedPointIndices, setSelectedPointIndices] = useState<Set<number>>(new Set());
+  const [tripToDelete, setTripToDelete] = useState<string | null>(null);
 
   useEffect(() => {
     const fetchRoutes = async () => {
@@ -1522,11 +1523,7 @@ function App() {
                     <span style={{ fontSize: '18px' }}>↻</span> Reset
                   </button>
                   <button
-                    onClick={() => {
-                      if (window.confirm(`Delete trip: ${trip.routeName}?`)) {
-                        deleteTrip(trip.tripId);
-                      }
-                    }}
+                    onClick={() => setTripToDelete(trip.tripId)}
                     style={{
                       width: '100%',
                       padding: '10px',
@@ -1691,6 +1688,74 @@ function App() {
                 }}
               >
                 Clear All
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      
+      {/* Delete Trip Confirmation Dialog */}
+      {tripToDelete && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(0, 0, 0, 0.5)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 10000
+        }}>
+          <div style={{
+            backgroundColor: 'white',
+            borderRadius: '12px',
+            padding: '24px',
+            maxWidth: '400px',
+            boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.3)'
+          }}>
+            <h3 style={{ fontSize: '18px', fontWeight: 'bold', marginBottom: '12px', color: '#1f2937' }}>
+              Delete Trip?
+            </h3>
+            <p style={{ fontSize: '14px', color: '#6b7280', marginBottom: '20px' }}>
+              Are you sure you want to delete the trip "{activeTrips.get(tripToDelete)?.routeName}"? This action cannot be undone.
+            </p>
+            <div style={{ display: 'flex', gap: '12px' }}>
+              <button
+                onClick={() => setTripToDelete(null)}
+                style={{
+                  flex: 1,
+                  padding: '10px',
+                  borderRadius: '8px',
+                  fontWeight: '600',
+                  fontSize: '14px',
+                  color: '#374151',
+                  backgroundColor: '#f3f4f6',
+                  border: '2px solid #e5e7eb',
+                  cursor: 'pointer'
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  deleteTrip(tripToDelete);
+                  setTripToDelete(null);
+                }}
+                style={{
+                  flex: 1,
+                  padding: '10px',
+                  borderRadius: '8px',
+                  fontWeight: '600',
+                  fontSize: '14px',
+                  color: 'white',
+                  backgroundColor: '#ef4444',
+                  border: 'none',
+                  cursor: 'pointer'
+                }}
+              >
+                Delete Trip
               </button>
             </div>
           </div>
