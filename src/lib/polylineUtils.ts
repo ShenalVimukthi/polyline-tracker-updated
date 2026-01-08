@@ -1,4 +1,4 @@
-import { decode } from '@googlemaps/polyline-codec';
+import { decode, encode } from '@googlemaps/polyline-codec';
 
 export interface LatLng {
   lat: number;
@@ -11,6 +11,14 @@ export interface LatLng {
 export function decodePolyline(encodedPolyline: string): LatLng[] {
   const decoded = decode(encodedPolyline, 5);
   return decoded.map(([lat, lng]) => ({ lat, lng }));
+}
+
+/**
+ * Encodes array of lat/lng coordinates to Google encoded polyline
+ */
+export function encodePolyline(points: LatLng[]): string {
+  const coordinates: [number, number][] = points.map(p => [p.lat, p.lng]);
+  return encode(coordinates, 5);
 }
 
 /**

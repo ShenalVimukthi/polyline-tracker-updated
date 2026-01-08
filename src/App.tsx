@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
-import { MapContainer, TileLayer, Polyline, CircleMarker, useMap } from 'react-leaflet';
+import { MapContainer, TileLayer, Polyline, CircleMarker, useMap, useMapEvents } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import { supabase, type MasterRoute } from './lib/supabase';
-import { decodePolyline, calculateTimePerPoint, formatDuration, type LatLng } from './lib/polylineUtils';
+import { decodePolyline, encodePolyline, calculateTimePerPoint, formatDuration, type LatLng } from './lib/polylineUtils';
 
 const defaultCenter: [number, number] = [6.9271, 79.8612];
 const MAX_TRIPS = 10;
@@ -22,6 +22,13 @@ interface ActiveTrip {
   color: string;
 }
 
+interface EditableRoute {
+  routeId: string | null; // null for new route
+  routeName: string;
+  points: LatLng[];
+  isNewRoute: boolean;
+}
+
 const TRIP_COLORS = [
   '#EF4444', '#3B82F6', '#10B981', '#F59E0B', '#8B5CF6',
   '#EC4899', '#14B8A6', '#F97316', '#6366F1', '#84CC16'
@@ -37,6 +44,25 @@ function MapBounds({ allPoints, disabled }: { allPoints: LatLng[], disabled: boo
       map.fitBounds(bounds);
     }
   }, [allPoints, map, disabled]);
+  
+  return null;
+}
+
+// Component to handle map click events for editing
+function MapClickHandler({ 
+  isEditMode, 
+  onMapClick 
+}: { 
+  isEditMode: boolean; 
+  onMapClick: (lat: number, lng: number) => void;
+}) {
+  useMapEvents({
+    click: (e) => {
+      if (isEditMode) {
+        onMapClick(e.latlng.lat, e.latlng.lng);
+      }
+    },
+  });
   
   return null;
 }
@@ -175,6 +201,16 @@ function App() {
   const [selectedSpeedMultiplier, setSelectedSpeedMultiplier] = useState<SpeedMultiplier>(1);
   const [mapCenter, setMapCenter] = useState<[number, number] | null>(null);
   const [isManualFocus, setIsManualFocus] = useState(false);
+  
+  // Edit mode state
+  const [isEditMode, setIsEditMode] = useState(false);
+  const [editableRoute, setEditableRoute] = useState<EditableRoute | null>(null);
+  const [newRouteName, setNewRouteName] = useState('');
+  const [selectedRouteForEdit, setSelectedRouteForEdit] = useState<string>('');
+  const [highlightedPointIndex, setHighlightedPointIndex] = useState<number | null>(null);
+  const [showExitConfirmation, setShowExitConfirmation] = useState(false);
+  const [showClearConfirmation, setShowClearConfirmation] = useState(false);
+  const [generatedPolyline, setGeneratedPolyline] = useState<string>('');
 
   useEffect(() => {
     const fetchRoutes = async () => {
@@ -431,6 +467,195 @@ function App() {
     setMapCenter(null);
   };
 
+  // Edit mode functions
+  const toggleEditMode = () => {
+    if (isEditMode) {
+      // Check if we have unsaved changes
+      if (editableRoute && editableRoute.points && editableRoute.points.length > 0) {
+        setShowExitConfirmation(true);
+      } else {
+        // No unsaved changes, exit immediately
+        exitEditMode();
+      }
+    } else {
+      // Enter edit mode
+      setIsEditMode(true);
+    }
+  };
+
+  const exitEditMode = () => {
+    setEditableRoute(null);
+    setNewRouteName('');
+    setSelectedRouteForEdit('');
+    setHighlightedPointIndex(null);
+    setIsManualFocus(false);
+    setMapCenter(null);
+    setIsEditMode(false);
+    setShowExitConfirmation(false);
+  };
+
+  const startNewRoute = () => {
+    if (!newRouteName.trim()) {
+      alert('Please enter a route name');
+      return;
+    }
+    setEditableRoute({
+      routeId: null,
+      routeName: newRouteName,
+      points: [],
+      isNewRoute: true
+    });
+  };
+
+  const startEditExistingRoute = () => {
+    if (!selectedRouteForEdit) {
+      alert('Please select a route to edit');
+      return;
+    }
+    
+    const route = routes.find(r => r.id === selectedRouteForEdit);
+    if (!route) return;
+    
+    let polyline = route.encoded_polyline;
+    if (polyline.includes('\\\\')) {
+      polyline = polyline.replace(/\\\\/g, '\\');
+    }
+    const points = decodePolyline(polyline);
+    
+    setEditableRoute({
+      routeId: route.id,
+      routeName: route.route_name,
+      points: points,
+      isNewRoute: false
+    });
+  };
+
+  const handleMapClick = (lat: number, lng: number) => {
+    if (!editableRoute) return;
+    
+    setEditableRoute({
+      ...editableRoute,
+      points: [...editableRoute.points, { lat, lng }]
+    });
+  };
+
+  const deletePoint = (index: number) => {
+    if (!editableRoute) return;
+    
+    const newPoints = editableRoute.points.filter((_, i) => i !== index);
+    setEditableRoute({
+      ...editableRoute,
+      points: newPoints
+    });
+    
+    // Clear highlight if deleted point was highlighted, or adjust index
+    if (highlightedPointIndex === index) {
+      setHighlightedPointIndex(null);
+    } else if (highlightedPointIndex !== null && highlightedPointIndex > index) {
+      setHighlightedPointIndex(highlightedPointIndex - 1);
+    }
+  };
+
+  const generatePolyline = () => {
+    if (!editableRoute || editableRoute.points.length < 2) {
+      alert('Please add at least 2 points to the route');
+      return;
+    }
+
+    const encodedPolyline = encodePolyline(editableRoute.points);
+    setGeneratedPolyline(encodedPolyline);
+  };
+
+  const saveToDatabase = async () => {
+    if (!editableRoute || !generatedPolyline) {
+      alert('Please generate the encoded polyline first');
+      return;
+    }
+
+    try {
+      if (editableRoute.isNewRoute) {
+        // Create new route
+        const maxRouteNumber = routes.reduce((max, r) => {
+          const num = parseInt(r.route_number);
+          return num > max ? num : max;
+        }, 0);
+        
+        const { error } = await supabase
+          .from('master_routes')
+          .insert({
+            route_number: String(maxRouteNumber + 1),
+            route_name: editableRoute.routeName,
+            origin_city: 'Custom',
+            destination_city: 'Custom',
+            total_distance_km: '0',
+            estimated_duration_minutes: 210,
+            encoded_polyline: generatedPolyline,
+            is_active: true
+          });
+
+        if (error) throw error;
+        alert('Route created successfully!');
+      } else {
+        // Update existing route
+        const { error } = await supabase
+          .from('master_routes')
+          .update({
+            encoded_polyline: generatedPolyline,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', editableRoute.routeId);
+
+        if (error) throw error;
+        alert('Route updated successfully!');
+      }
+      
+      // Refresh routes
+      const { data } = await supabase
+        .from('master_routes')
+        .select('*')
+        .order('route_number', { ascending: true });
+      
+      if (data) {
+        setRoutes(data);
+      }
+      
+      // Clear edit state
+      setEditableRoute(null);
+      setNewRouteName('');
+      setSelectedRouteForEdit('');
+      setHighlightedPointIndex(null);
+      setGeneratedPolyline('');
+    } catch (err) {
+      console.error('Error saving route:', err);
+      alert('Failed to save route');
+    }
+  };
+
+  const clearRoute = () => {
+    setShowClearConfirmation(true);
+  };
+
+  const confirmClearRoute = () => {
+    if (editableRoute) {
+      setEditableRoute({
+        ...editableRoute,
+        points: []
+      });
+      setHighlightedPointIndex(null);
+      setGeneratedPolyline('');
+    }
+    setShowClearConfirmation(false);
+  };
+
+  const focusOnPoint = (index: number) => {
+    if (!editableRoute || !editableRoute.points[index]) return;
+    
+    const point = editableRoute.points[index];
+    setMapCenter([point.lat, point.lng]);
+    setIsManualFocus(true);
+    setHighlightedPointIndex(index);
+  };
+
   return (
     <div style={{ display: 'flex', width: '100vw', height: '100vh', overflow: 'hidden', fontFamily: 'system-ui, sans-serif' }}>
       <div style={{ flex: 1, position: 'relative', backgroundColor: '#e5e7eb' }}>
@@ -444,12 +669,43 @@ function App() {
             attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
             url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
           />
-          {allPoints.length > 0 && <MapBounds allPoints={allPoints} disabled={isManualFocus} />}
+          {allPoints.length > 0 && !isEditMode && <MapBounds allPoints={allPoints} disabled={isManualFocus} />}
           <MapCenter center={mapCenter} />
           <ZoomControls onFocusAll={focusAllTrips} />
+          <MapClickHandler isEditMode={isEditMode && editableRoute !== null} onMapClick={handleMapClick} />
+          
+          {/* Render editable route in edit mode */}
+          {isEditMode && editableRoute && editableRoute.points.length > 0 && (
+            <>
+              <Polyline 
+                positions={editableRoute.points.map(p => [p.lat, p.lng] as [number, number])} 
+                pathOptions={{ color: '#8B5CF6', weight: 4, opacity: 0.8 }}
+              />
+              {editableRoute.points.map((point, index) => (
+                <CircleMarker
+                  key={`edit-${index}`}
+                  center={[point.lat, point.lng]}
+                  radius={highlightedPointIndex === index ? 15 : 8}
+                  pathOptions={{
+                    fillColor: highlightedPointIndex === index ? '#FCD34D' : '#8B5CF6',
+                    fillOpacity: highlightedPointIndex === index ? 1 : 0.8,
+                    color: '#FFFFFF',
+                    weight: highlightedPointIndex === index ? 4 : 2
+                  }}
+                  eventHandlers={{
+                    click: () => {
+                      if (window.confirm(`Delete point ${index + 1}?`)) {
+                        deletePoint(index);
+                      }
+                    }
+                  }}
+                />
+              ))}
+            </>
+          )}
           
           {/* Render all trip polylines and markers */}
-          {Array.from(activeTrips.values()).map((trip) => (
+          {!isEditMode && Array.from(activeTrips.values()).map((trip) => (
             <div key={trip.tripId}>
               <Polyline 
                 positions={trip.decodedPoints.map(p => [p.lat, p.lng] as [number, number])} 
@@ -517,8 +773,309 @@ function App() {
       </div>
       
       <div style={{ width: '450px', backgroundColor: 'white', boxShadow: '-4px 0 6px -1px rgba(0, 0, 0, 0.1)', overflowY: 'auto', height: '100vh', padding: '24px' }}>
-        {/* Create New Trip Section */}
-        <div style={{ marginBottom: '24px', padding: '16px', backgroundColor: '#f9fafb', borderRadius: '8px', border: '2px solid #e5e7eb' }}>
+        {/* Edit Mode Toggle */}
+        <div style={{ marginBottom: '24px' }}>
+          <button
+            onClick={toggleEditMode}
+            style={{
+              width: '100%',
+              padding: '14px 16px',
+              borderRadius: '8px',
+              fontWeight: '600',
+              fontSize: '16px',
+              color: 'white',
+              backgroundColor: isEditMode ? '#ef4444' : '#8B5CF6',
+              border: 'none',
+              cursor: 'pointer',
+              boxShadow: '0 2px 6px rgba(0, 0, 0, 0.15)',
+              transition: 'all 0.2s ease'
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.transform = 'scale(1.02)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.transform = 'scale(1)';
+            }}
+          >
+            {isEditMode ? '✏️ Exit Edit Mode' : '✏️ Enter Edit Mode'}
+          </button>
+        </div>
+
+        {/* Edit Mode Panel */}
+        {isEditMode ? (
+          <div style={{ marginBottom: '24px' }}>
+            {!editableRoute ? (
+              <div style={{ padding: '16px', backgroundColor: '#f3f4f6', borderRadius: '8px', border: '2px solid #e5e7eb' }}>
+                <h2 style={{ fontSize: '18px', fontWeight: 'bold', marginBottom: '16px', color: '#1f2937' }}>
+                  Route Editor
+                </h2>
+                
+                {/* Create New Route */}
+                <div style={{ marginBottom: '16px', padding: '12px', backgroundColor: 'white', borderRadius: '8px' }}>
+                  <h3 style={{ fontSize: '14px', fontWeight: '600', marginBottom: '8px', color: '#374151' }}>
+                    Create New Route
+                  </h3>
+                  <input
+                    type="text"
+                    placeholder="Route name"
+                    value={newRouteName}
+                    onChange={(e) => setNewRouteName(e.target.value)}
+                    style={{
+                      width: '100%',
+                      padding: '10px 12px',
+                      borderRadius: '6px',
+                      border: '2px solid #e5e7eb',
+                      fontSize: '14px',
+                      marginBottom: '8px'
+                    }}
+                  />
+                  <button
+                    onClick={startNewRoute}
+                    disabled={!newRouteName.trim()}
+                    style={{
+                      width: '100%',
+                      padding: '10px',
+                      borderRadius: '6px',
+                      fontWeight: '600',
+                      fontSize: '14px',
+                      color: 'white',
+                      backgroundColor: newRouteName.trim() ? '#10b981' : '#9ca3af',
+                      border: 'none',
+                      cursor: newRouteName.trim() ? 'pointer' : 'not-allowed'
+                    }}
+                  >
+                    ➕ Create New Route
+                  </button>
+                </div>
+
+                {/* Edit Existing Route */}
+                <div style={{ padding: '12px', backgroundColor: 'white', borderRadius: '8px' }}>
+                  <h3 style={{ fontSize: '14px', fontWeight: '600', marginBottom: '8px', color: '#374151' }}>
+                    Edit Existing Route
+                  </h3>
+                  <select
+                    value={selectedRouteForEdit}
+                    onChange={(e) => setSelectedRouteForEdit(e.target.value)}
+                    style={{
+                      width: '100%',
+                      padding: '10px 12px',
+                      borderRadius: '6px',
+                      border: '2px solid #e5e7eb',
+                      fontSize: '14px',
+                      marginBottom: '8px',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    <option value="">Select a route</option>
+                    {routes.map((r) => (
+                      <option key={r.id} value={r.id}>
+                        #{r.route_number} - {r.route_name}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    onClick={startEditExistingRoute}
+                    disabled={!selectedRouteForEdit}
+                    style={{
+                      width: '100%',
+                      padding: '10px',
+                      borderRadius: '6px',
+                      fontWeight: '600',
+                      fontSize: '14px',
+                      color: 'white',
+                      backgroundColor: selectedRouteForEdit ? '#3b82f6' : '#9ca3af',
+                      border: 'none',
+                      cursor: selectedRouteForEdit ? 'pointer' : 'not-allowed'
+                    }}
+                  >
+                    ✏️ Edit Route
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div style={{ padding: '16px', backgroundColor: '#f3f4f6', borderRadius: '8px', border: '3px solid #8B5CF6' }}>
+                <h2 style={{ fontSize: '18px', fontWeight: 'bold', marginBottom: '12px', color: '#1f2937' }}>
+                  {editableRoute.isNewRoute ? '🆕 New Route' : '✏️ Editing Route'}
+                </h2>
+                <p style={{ fontSize: '16px', fontWeight: '600', color: '#8B5CF6', marginBottom: '12px' }}>
+                  {editableRoute.routeName}
+                </p>
+                
+                <div style={{ marginBottom: '12px', padding: '12px', backgroundColor: 'white', borderRadius: '6px' }}>
+                  <p style={{ fontSize: '14px', color: '#374151', marginBottom: '4px' }}>
+                    <strong>Points:</strong> {editableRoute.points.length}
+                  </p>
+                  <p style={{ fontSize: '12px', color: '#6b7280' }}>
+                    💡 Click on map to add points. Click markers to delete.
+                  </p>
+                </div>
+
+                {editableRoute.points.length > 0 && (
+                  <div style={{ marginBottom: '12px', maxHeight: '150px', overflowY: 'auto', backgroundColor: 'white', borderRadius: '6px', padding: '8px' }}>
+                    {editableRoute.points.map((point, index) => (
+                      <div 
+                        key={index}
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          padding: '6px 8px',
+                          borderBottom: index < editableRoute.points.length - 1 ? '1px solid #e5e7eb' : 'none',
+                          fontSize: '12px',
+                          fontFamily: 'monospace',
+                          backgroundColor: highlightedPointIndex === index ? '#FEF3C7' : 'transparent',
+                          borderRadius: '4px',
+                          transition: 'background-color 0.3s ease'
+                        }}
+                      >
+                        <span 
+                          onClick={() => focusOnPoint(index)}
+                          style={{ 
+                            color: highlightedPointIndex === index ? '#92400E' : '#374151',
+                            cursor: 'pointer',
+                            flex: 1,
+                            fontWeight: highlightedPointIndex === index ? '600' : 'normal'
+                          }}
+                          title="Click to view on map"
+                        >
+                          {index + 1}. {point.lat.toFixed(6)}, {point.lng.toFixed(6)}
+                        </span>
+                        <button
+                          onClick={() => deletePoint(index)}
+                          style={{
+                            padding: '2px 8px',
+                            borderRadius: '4px',
+                            backgroundColor: '#fee2e2',
+                            color: '#ef4444',
+                            border: 'none',
+                            cursor: 'pointer',
+                            fontSize: '12px',
+                            fontWeight: '600'
+                          }}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  <button
+                    onClick={generatePolyline}
+                    disabled={editableRoute.points.length < 2}
+                    style={{
+                      width: '100%',
+                      padding: '12px',
+                      borderRadius: '6px',
+                      fontWeight: '600',
+                      fontSize: '14px',
+                      color: 'white',
+                      backgroundColor: editableRoute.points.length >= 2 ? '#3b82f6' : '#9ca3af',
+                      border: 'none',
+                      cursor: editableRoute.points.length >= 2 ? 'pointer' : 'not-allowed'
+                    }}
+                  >
+                    🧮 Calculate Encoded Polyline
+                  </button>
+                  
+                  {generatedPolyline && (
+                    <div style={{ padding: '12px', backgroundColor: 'white', borderRadius: '6px', border: '2px solid #3b82f6' }}>
+                      <p style={{ fontSize: '12px', fontWeight: '600', color: '#374151', marginBottom: '4px' }}>
+                        Generated Polyline:
+                      </p>
+                      <div style={{
+                        fontSize: '11px',
+                        fontFamily: 'monospace',
+                        color: '#6b7280',
+                        backgroundColor: '#f3f4f6',
+                        padding: '12px',
+                        borderRadius: '4px',
+                        wordBreak: 'break-all',
+                        maxHeight: '120px',
+                        overflowY: 'auto'
+                      }}>
+                        {generatedPolyline}
+                      </div>
+                      <p style={{ fontSize: '11px', color: '#9ca3af', marginTop: '4px' }}>
+                        Length: {generatedPolyline.length} characters
+                      </p>
+                    </div>
+                  )}
+                  
+                  <button
+                    onClick={saveToDatabase}
+                    disabled={!generatedPolyline}
+                    style={{
+                      width: '100%',
+                      padding: '12px',
+                      borderRadius: '6px',
+                      fontWeight: '600',
+                      fontSize: '14px',
+                      color: 'white',
+                      backgroundColor: generatedPolyline ? '#10b981' : '#9ca3af',
+                      border: 'none',
+                      cursor: generatedPolyline ? 'pointer' : 'not-allowed'
+                    }}
+                  >
+                    💾 Save to Database
+                  </button>
+                  <button
+                    onClick={clearRoute}
+                    style={{
+                      width: '100%',
+                      padding: '10px',
+                      borderRadius: '6px',
+                      fontWeight: '600',
+                      fontSize: '14px',
+                      color: '#ef4444',
+                      backgroundColor: '#fee2e2',
+                      border: '2px solid #fecaca',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    🗑️ Clear All Points
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (editableRoute.points.length > 0) {
+                        if (window.confirm('Cancel editing? Unsaved changes will be lost.')) {
+                          setEditableRoute(null);
+                          setNewRouteName('');
+                          setSelectedRouteForEdit('');
+                          setHighlightedPointIndex(null);
+                          setGeneratedPolyline('');
+                        }
+                      } else {
+                        setEditableRoute(null);
+                        setNewRouteName('');
+                        setSelectedRouteForEdit('');
+                        setHighlightedPointIndex(null);
+                        setGeneratedPolyline('');
+                      }
+                    }}
+                    style={{
+                      width: '100%',
+                      padding: '10px',
+                      borderRadius: '6px',
+                      fontWeight: '600',
+                      fontSize: '14px',
+                      color: '#6b7280',
+                      backgroundColor: '#f3f4f6',
+                      border: '2px solid #e5e7eb',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    ← Back
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        ) : (
+          <>
+            {/* Create New Trip Section */}
+            <div style={{ marginBottom: '24px', padding: '16px', backgroundColor: '#f9fafb', borderRadius: '8px', border: '2px solid #e5e7eb' }}>
           <h2 style={{ fontSize: '18px', fontWeight: 'bold', marginBottom: '12px', color: '#1f2937' }}>
             Create New Trip ({activeTrips.size}/{MAX_TRIPS})
           </h2>
@@ -782,7 +1339,139 @@ function App() {
             </div>
           )}
         </div>
+          </>
+        )}
       </div>
+      
+      {/* Exit Confirmation Dialog */}
+      {showExitConfirmation && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(0, 0, 0, 0.5)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 10000
+        }}>
+          <div style={{
+            backgroundColor: 'white',
+            borderRadius: '12px',
+            padding: '24px',
+            maxWidth: '400px',
+            boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.3)'
+          }}>
+            <h3 style={{ fontSize: '18px', fontWeight: 'bold', marginBottom: '12px', color: '#1f2937' }}>
+              Exit Edit Mode?
+            </h3>
+            <p style={{ fontSize: '14px', color: '#6b7280', marginBottom: '20px' }}>
+              You have {editableRoute?.points.length || 0} unsaved points. Are you sure you want to exit without saving?
+            </p>
+            <div style={{ display: 'flex', gap: '12px' }}>
+              <button
+                onClick={() => setShowExitConfirmation(false)}
+                style={{
+                  flex: 1,
+                  padding: '10px',
+                  borderRadius: '8px',
+                  fontWeight: '600',
+                  fontSize: '14px',
+                  color: '#374151',
+                  backgroundColor: '#f3f4f6',
+                  border: '2px solid #e5e7eb',
+                  cursor: 'pointer'
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={exitEditMode}
+                style={{
+                  flex: 1,
+                  padding: '10px',
+                  borderRadius: '8px',
+                  fontWeight: '600',
+                  fontSize: '14px',
+                  color: 'white',
+                  backgroundColor: '#ef4444',
+                  border: 'none',
+                  cursor: 'pointer'
+                }}
+              >
+                Exit Anyway
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      
+      {/* Clear All Points Confirmation Dialog */}
+      {showClearConfirmation && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(0, 0, 0, 0.5)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 10000
+        }}>
+          <div style={{
+            backgroundColor: 'white',
+            borderRadius: '12px',
+            padding: '24px',
+            maxWidth: '400px',
+            boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.3)'
+          }}>
+            <h3 style={{ fontSize: '18px', fontWeight: 'bold', marginBottom: '12px', color: '#1f2937' }}>
+              Clear All Points?
+            </h3>
+            <p style={{ fontSize: '14px', color: '#6b7280', marginBottom: '20px' }}>
+              This will remove all {editableRoute?.points.length || 0} points from the route. This action cannot be undone.
+            </p>
+            <div style={{ display: 'flex', gap: '12px' }}>
+              <button
+                onClick={() => setShowClearConfirmation(false)}
+                style={{
+                  flex: 1,
+                  padding: '10px',
+                  borderRadius: '8px',
+                  fontWeight: '600',
+                  fontSize: '14px',
+                  color: '#374151',
+                  backgroundColor: '#f3f4f6',
+                  border: '2px solid #e5e7eb',
+                  cursor: 'pointer'
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmClearRoute}
+                style={{
+                  flex: 1,
+                  padding: '10px',
+                  borderRadius: '8px',
+                  fontWeight: '600',
+                  fontSize: '14px',
+                  color: 'white',
+                  backgroundColor: '#ef4444',
+                  border: 'none',
+                  cursor: 'pointer'
+                }}
+              >
+                Clear All
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
