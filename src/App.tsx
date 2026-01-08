@@ -50,19 +50,53 @@ function MapBounds({ allPoints, disabled }: { allPoints: LatLng[], disabled: boo
 
 // Component to handle map click events for editing
 function MapClickHandler({ 
-  isEditMode, 
-  onMapClick 
+  isEditMode,
+  editModeType,
+  onMapClick,
+  onDragStart,
+  onDragMove,
+  onDragEnd
 }: { 
-  isEditMode: boolean; 
+  isEditMode: boolean;
+  editModeType: 'add' | 'select';
   onMapClick: (lat: number, lng: number) => void;
+  onDragStart: (lat: number, lng: number) => void;
+  onDragMove: (lat: number, lng: number) => void;
+  onDragEnd: (lat: number, lng: number) => void;
 }) {
-  useMapEvents({
+  const map = useMapEvents({
+    mousedown: (e) => {
+      if (isEditMode && editModeType === 'select') {
+        map.dragging.disable(); // Disable map dragging
+        onDragStart(e.latlng.lat, e.latlng.lng);
+      }
+    },
+    mousemove: (e) => {
+      if (isEditMode && editModeType === 'select') {
+        onDragMove(e.latlng.lat, e.latlng.lng);
+      }
+    },
+    mouseup: (e) => {
+      if (isEditMode && editModeType === 'select') {
+        onDragEnd(e.latlng.lat, e.latlng.lng);
+        map.dragging.enable(); // Re-enable map dragging
+      }
+    },
     click: (e) => {
-      if (isEditMode) {
+      if (isEditMode && editModeType === 'add') {
         onMapClick(e.latlng.lat, e.latlng.lng);
       }
     },
   });
+  
+  // Disable/enable dragging based on edit mode type
+  useEffect(() => {
+    if (isEditMode && editModeType === 'select') {
+      // Keep dragging enabled until mousedown
+    } else {
+      map.dragging.enable();
+    }
+  }, [isEditMode, editModeType, map]);
   
   return null;
 }
@@ -211,6 +245,11 @@ function App() {
   const [showExitConfirmation, setShowExitConfirmation] = useState(false);
   const [showClearConfirmation, setShowClearConfirmation] = useState(false);
   const [generatedPolyline, setGeneratedPolyline] = useState<string>('');
+  const [editModeType, setEditModeType] = useState<'add' | 'select'>('add');
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragStart, setDragStart] = useState<LatLng | null>(null);
+  const [dragCurrent, setDragCurrent] = useState<LatLng | null>(null);
+  const [selectedPointIndices, setSelectedPointIndices] = useState<Set<number>>(new Set());
 
   useEffect(() => {
     const fetchRoutes = async () => {
@@ -539,6 +578,68 @@ function App() {
     });
   };
 
+  const handleDragStart = (lat: number, lng: number) => {
+    setIsDragging(true);
+    setDragStart({ lat, lng });
+    setDragCurrent({ lat, lng });
+  };
+
+  const handleDragMove = (lat: number, lng: number) => {
+    if (isDragging && dragStart) {
+      setDragCurrent({ lat, lng });
+      
+      // Calculate which points are in the selection area
+      if (editableRoute) {
+        const minLat = Math.min(dragStart.lat, lat);
+        const maxLat = Math.max(dragStart.lat, lat);
+        const minLng = Math.min(dragStart.lng, lng);
+        const maxLng = Math.max(dragStart.lng, lng);
+        
+        const indices = new Set<number>();
+        editableRoute.points.forEach((point, index) => {
+          if (point.lat >= minLat && point.lat <= maxLat &&
+              point.lng >= minLng && point.lng <= maxLng) {
+            indices.add(index);
+          }
+        });
+        setSelectedPointIndices(indices);
+      }
+    }
+  };
+
+  const handleDragEnd = (lat: number, lng: number) => {
+    if (isDragging && dragStart) {
+      setIsDragging(false);
+      
+      // Final selection calculation
+      if (editableRoute && selectedPointIndices.size > 0) {
+        // Keep the selection, don't auto-delete
+        // User can click delete button
+      }
+      
+      setDragStart(null);
+      setDragCurrent(null);
+    }
+  };
+
+  const deleteSelectedPoints = () => {
+    if (editableRoute && selectedPointIndices.size > 0) {
+      const newPoints = editableRoute.points.filter((_, i) => !selectedPointIndices.has(i));
+      setEditableRoute({
+        ...editableRoute,
+        points: newPoints
+      });
+      setSelectedPointIndices(new Set());
+    }
+  };
+
+  const clearSelection = () => {
+    setSelectedPointIndices(new Set());
+    setDragStart(null);
+    setDragCurrent(null);
+    setIsDragging(false);
+  };
+
   const deletePoint = (index: number) => {
     if (!editableRoute) return;
     
@@ -672,7 +773,14 @@ function App() {
           {allPoints.length > 0 && !isEditMode && <MapBounds allPoints={allPoints} disabled={isManualFocus} />}
           <MapCenter center={mapCenter} />
           <ZoomControls onFocusAll={focusAllTrips} />
-          <MapClickHandler isEditMode={isEditMode && editableRoute !== null} onMapClick={handleMapClick} />
+          <MapClickHandler 
+            isEditMode={isEditMode && editableRoute !== null} 
+            editModeType={editModeType}
+            onMapClick={handleMapClick}
+            onDragStart={handleDragStart}
+            onDragMove={handleDragMove}
+            onDragEnd={handleDragEnd}
+          />
           
           {/* Render editable route in edit mode */}
           {isEditMode && editableRoute && editableRoute.points.length > 0 && (
@@ -681,26 +789,56 @@ function App() {
                 positions={editableRoute.points.map(p => [p.lat, p.lng] as [number, number])} 
                 pathOptions={{ color: '#8B5CF6', weight: 4, opacity: 0.8 }}
               />
-              {editableRoute.points.map((point, index) => (
-                <CircleMarker
-                  key={`edit-${index}`}
-                  center={[point.lat, point.lng]}
-                  radius={highlightedPointIndex === index ? 15 : 8}
-                  pathOptions={{
-                    fillColor: highlightedPointIndex === index ? '#FCD34D' : '#8B5CF6',
-                    fillOpacity: highlightedPointIndex === index ? 1 : 0.8,
-                    color: '#FFFFFF',
-                    weight: highlightedPointIndex === index ? 4 : 2
-                  }}
-                  eventHandlers={{
-                    click: () => {
-                      if (window.confirm(`Delete point ${index + 1}?`)) {
-                        deletePoint(index);
+              {editableRoute.points.map((point, index) => {
+                const isSelected = selectedPointIndices.has(index);
+                const isHighlighted = highlightedPointIndex === index;
+                return (
+                  <CircleMarker
+                    key={`edit-${index}`}
+                    center={[point.lat, point.lng]}
+                    radius={isHighlighted ? 15 : (isSelected ? 10 : 8)}
+                    pathOptions={{
+                      fillColor: isHighlighted ? '#FCD34D' : (isSelected ? '#EF4444' : '#8B5CF6'),
+                      fillOpacity: isHighlighted ? 1 : (isSelected ? 0.9 : 0.8),
+                      color: '#FFFFFF',
+                      weight: isHighlighted ? 4 : (isSelected ? 3 : 2)
+                    }}
+                    eventHandlers={{
+                      click: () => {
+                        if (editModeType === 'add') {
+                          if (window.confirm(`Delete point ${index + 1}?`)) {
+                            deletePoint(index);
+                          }
+                        }
                       }
-                    }
-                  }}
-                />
-              ))}
+                    }}
+                  />
+                );
+              })}
+              
+              {/* Selection box during drag */}
+              {dragStart && dragCurrent && (
+                <>
+                  <Polyline 
+                    positions={[
+                      [dragStart.lat, dragStart.lng],
+                      [dragStart.lat, dragCurrent.lng],
+                      [dragCurrent.lat, dragCurrent.lng],
+                      [dragCurrent.lat, dragStart.lng],
+                      [dragStart.lat, dragStart.lng]
+                    ]}
+                    pathOptions={{ 
+                      color: '#3B82F6', 
+                      weight: 2, 
+                      opacity: 0.8,
+                      dashArray: '5, 5',
+                      fill: true,
+                      fillColor: '#3B82F6',
+                      fillOpacity: 0.1
+                    }}
+                  />
+                </>
+              )}
             </>
           )}
           
@@ -901,13 +1039,99 @@ function App() {
                   {editableRoute.routeName}
                 </p>
                 
+                {/* Edit Mode Toggle Buttons */}
+                <div style={{ marginBottom: '12px', display: 'flex', gap: '8px' }}>
+                  <button
+                    onClick={() => {
+                      setEditModeType('add');
+                      clearSelection();
+                    }}
+                    style={{
+                      flex: 1,
+                      padding: '10px',
+                      borderRadius: '6px',
+                      fontWeight: '600',
+                      fontSize: '13px',
+                      color: editModeType === 'add' ? 'white' : '#374151',
+                      backgroundColor: editModeType === 'add' ? '#8B5CF6' : 'white',
+                      border: `2px solid ${editModeType === 'add' ? '#8B5CF6' : '#e5e7eb'}`,
+                      cursor: 'pointer',
+                      transition: 'all 0.2s ease'
+                    }}
+                  >
+                    ➕ Add Points
+                  </button>
+                  <button
+                    onClick={() => {
+                      setEditModeType('select');
+                      clearSelection();
+                    }}
+                    style={{
+                      flex: 1,
+                      padding: '10px',
+                      borderRadius: '6px',
+                      fontWeight: '600',
+                      fontSize: '13px',
+                      color: editModeType === 'select' ? 'white' : '#374151',
+                      backgroundColor: editModeType === 'select' ? '#8B5CF6' : 'white',
+                      border: `2px solid ${editModeType === 'select' ? '#8B5CF6' : '#e5e7eb'}`,
+                      cursor: 'pointer',
+                      transition: 'all 0.2s ease'
+                    }}
+                  >
+                    🔲 Select Area
+                  </button>
+                </div>
+                
                 <div style={{ marginBottom: '12px', padding: '12px', backgroundColor: 'white', borderRadius: '6px' }}>
                   <p style={{ fontSize: '14px', color: '#374151', marginBottom: '4px' }}>
                     <strong>Points:</strong> {editableRoute.points.length}
+                    {selectedPointIndices.size > 0 && (
+                      <span style={{ color: '#EF4444', marginLeft: '8px' }}>
+                        ({selectedPointIndices.size} selected)
+                      </span>
+                    )}
                   </p>
                   <p style={{ fontSize: '12px', color: '#6b7280' }}>
-                    💡 Click on map to add points. Click markers to delete.
+                    💡 {editModeType === 'add' 
+                      ? 'Click on map to add points. Click markers to delete.' 
+                      : 'Click and drag on the map to select points in an area.'}
                   </p>
+                  {selectedPointIndices.size > 0 && (
+                    <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
+                      <button
+                        onClick={deleteSelectedPoints}
+                        style={{
+                          flex: 1,
+                          padding: '8px',
+                          borderRadius: '6px',
+                          fontWeight: '600',
+                          fontSize: '12px',
+                          color: 'white',
+                          backgroundColor: '#EF4444',
+                          border: 'none',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        🗑️ Delete {selectedPointIndices.size} Points
+                      </button>
+                      <button
+                        onClick={clearSelection}
+                        style={{
+                          padding: '8px 12px',
+                          borderRadius: '6px',
+                          fontWeight: '600',
+                          fontSize: '12px',
+                          color: '#6b7280',
+                          backgroundColor: '#f3f4f6',
+                          border: '2px solid #e5e7eb',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  )}
                 </div>
 
                 {editableRoute.points.length > 0 && (
