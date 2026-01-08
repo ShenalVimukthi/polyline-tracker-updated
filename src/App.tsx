@@ -438,7 +438,7 @@ function App() {
           center={defaultCenter} 
           zoom={10} 
           style={{ width: '100%', height: '100%' }}
-          zoomControl={true}
+          zoomControl={false}
         >
           <TileLayer
             attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
