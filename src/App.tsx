@@ -251,6 +251,7 @@ function App() {
   const [dragCurrent, setDragCurrent] = useState<LatLng | null>(null);
   const [selectedPointIndices, setSelectedPointIndices] = useState<Set<number>>(new Set());
   const [tripToDelete, setTripToDelete] = useState<string | null>(null);
+  const [showBackConfirmation, setShowBackConfirmation] = useState(false);
 
   useEffect(() => {
     const fetchRoutes = async () => {
@@ -1264,19 +1265,14 @@ function App() {
                   <button
                     onClick={() => {
                       if (editableRoute.points.length > 0) {
-                        if (window.confirm('Cancel editing? Unsaved changes will be lost.')) {
-                          setEditableRoute(null);
-                          setNewRouteName('');
-                          setSelectedRouteForEdit('');
-                          setHighlightedPointIndex(null);
-                          setGeneratedPolyline('');
-                        }
+                        setShowBackConfirmation(true);
                       } else {
                         setEditableRoute(null);
                         setNewRouteName('');
                         setSelectedRouteForEdit('');
                         setHighlightedPointIndex(null);
                         setGeneratedPolyline('');
+                        clearSelection();
                       }
                     }}
                     style={{
@@ -1756,6 +1752,79 @@ function App() {
                 }}
               >
                 Delete Trip
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      
+      {/* Back Button Confirmation Dialog */}
+      {showBackConfirmation && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(0, 0, 0, 0.5)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 10000
+        }}>
+          <div style={{
+            backgroundColor: 'white',
+            borderRadius: '12px',
+            padding: '24px',
+            maxWidth: '400px',
+            boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.3)'
+          }}>
+            <h3 style={{ fontSize: '18px', fontWeight: 'bold', marginBottom: '12px', color: '#1f2937' }}>
+              Cancel Editing?
+            </h3>
+            <p style={{ fontSize: '14px', color: '#6b7280', marginBottom: '20px' }}>
+              You have {editableRoute?.points.length || 0} unsaved points. Are you sure you want to go back? All changes will be lost.
+            </p>
+            <div style={{ display: 'flex', gap: '12px' }}>
+              <button
+                onClick={() => setShowBackConfirmation(false)}
+                style={{
+                  flex: 1,
+                  padding: '10px',
+                  borderRadius: '8px',
+                  fontWeight: '600',
+                  fontSize: '14px',
+                  color: '#374151',
+                  backgroundColor: '#f3f4f6',
+                  border: '2px solid #e5e7eb',
+                  cursor: 'pointer'
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  setEditableRoute(null);
+                  setNewRouteName('');
+                  setSelectedRouteForEdit('');
+                  setHighlightedPointIndex(null);
+                  setGeneratedPolyline('');
+                  clearSelection();
+                  setShowBackConfirmation(false);
+                }}
+                style={{
+                  flex: 1,
+                  padding: '10px',
+                  borderRadius: '8px',
+                  fontWeight: '600',
+                  fontSize: '14px',
+                  color: 'white',
+                  backgroundColor: '#ef4444',
+                  border: 'none',
+                  cursor: 'pointer'
+                }}
+              >
+                Go Back
               </button>
             </div>
           </div>

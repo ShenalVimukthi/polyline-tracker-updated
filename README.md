@@ -1,18 +1,42 @@
 # Polyline Tracker
 
-A web application for visualizing and animating route polylines from Supabase on Google Maps.
+A powerful web application for visualizing, animating, and editing route polylines with real-time trip simulation and comprehensive route management capabilities.
 
-## Features
+## ✨ Features
 
-- 🗺️ Google Maps integration with polyline visualization
-- 📍 Decode and display all route points
-- 🎯 Animated point-to-point tracking
-- ⚡ Speed controls (1x, 2x, 3x, 5x, 10x, 20x)
-- 📊 Real-time progress tracking
-- 📋 Complete location list with coordinates
-- 🎨 Modern UI with Tailwind CSS
+### 🎬 Trip Animation
+- **Multi-Trip Support**: Manage up to 10 simultaneous trip animations
+- **Speed Controls**: Adjustable animation speeds (1x, 2x, 3x, 5x, 10x, 20x)
+- **Real-time Progress**: Track trip progress with visual indicators and time estimates
+- **Interactive Controls**: Start, stop, and reset trip animations
+- **Color-Coded Routes**: Each trip has a unique color for easy identification
 
-## Setup Instructions
+### ✏️ Route Editing Mode
+- **Create New Routes**: Design custom routes by clicking points on the map
+- **Edit Existing Routes**: Modify any route by adding or removing points
+- **Dual Edit Modes**:
+  - **Add Points Mode**: Click to add individual points, click markers to delete
+  - **Select Area Mode**: Drag to select multiple points in a rectangular area for bulk deletion
+- **Visual Feedback**: 
+  - Selected points highlighted in red
+  - Real-time selection box with dashed border
+  - Point counter with selection status
+- **Polyline Encoding**: Generate Google-encoded polylines from your custom routes
+- **Database Integration**: Save new routes or update existing ones directly to Supabase
+
+### 🗺️ Map Features
+- **Interactive Map**: Leaflet/OpenStreetMap integration with zoom and pan controls
+- **Point Visualization**: All route points displayed as markers
+- **Current Location Indicators**: Track active trip positions in real-time
+- **Focus Controls**: Focus on individual trips or view all trips at once
+- **Click-to-Highlight**: Click coordinates in the list to highlight and center them on the map
+
+### 📊 Data Management
+- **Route Database**: Store and manage routes in Supabase
+- **Trip Tracking**: Persist trip state in the `current_locations` table
+- **Real-time Updates**: Live synchronization between UI and database
+
+## 🚀 Setup Instructions
 
 ### 1. Install Dependencies
 
@@ -22,65 +46,124 @@ npm install
 
 ### 2. Configure Environment Variables
 
-Create a `.env` file in the root directory with your API keys:
+Create a `.env` file in the root directory:
 
 ```env
-VITE_GOOGLE_MAPS_API_KEY=your_google_maps_api_key_here
 VITE_SUPABASE_URL=your_supabase_project_url_here
 VITE_SUPABASE_ANON_KEY=your_supabase_anon_key_here
 ```
 
-**Important:** 
-- Get your Google Maps API key from [Google Cloud Console](https://console.cloud.google.com/)
-- Enable the Maps JavaScript API and Directions API
--se credentials from your [Supabase project settings](https://supabase.com/dashboard)
+**Get Supabase credentials from your [Supabase project settings](https://supabase.com/dashboard)**
 
-### 3. Run the Development Server
+### 3. Set Up Database
+
+Run the SQL schema from `database-schema.sql` in your Supabase SQL editor to create the required tables:
+- `master_routes` - Stores route data with encoded polylines
+- `current_locations` - Tracks active trip states
+
+### 4. Run the Development Server
 
 ```bash
 npm run dev
 ```
 
-The app will be available at `http://localh
-- 🗺️
-## How It Works
+The app will be available at `http://localhost:5173`
 
-1. **Data Fetching**: The app fetches route data from your Supabase `master_routes` table
-2. **Polyline Decoding**: The encoded polyline is decoded into latitude/longitude coordi- 📋 Complete location list wite total estimated duration is divided by the number of points to calculate time per point
-4. **Animation**: Points are animated sequentially based on the calculated time intervals
-5. **Speed Control**: 
-```env
-VITE_GOOGLE_MAPS_API_KEY=your_google_maps_api_key_her10x, 20x)
+## 📖 Usage Guide
 
-## Database Schema
+### Creating a Trip
+1. Select a route from the dropdown
+2. Choose animation speed
+3. Click "Create Trip"
+4. Use Start/Stop/Reset controls to manage the trip
 
-The app expects a `master_routes` table in Supabase with the following structure:
+### Editing Routes
 
+#### Enter Edit Mode
+1. Click "✏️ Enter Edit Mode" button
+2. Choose to create a new route or edit an existing one
+
+#### Create New Route
+1. Enter a route name
+2. Click "➕ Create New Route"
+3. Switch between **Add Points** and **Select Area** modes:
+   - **Add Points**: Click map to add points, click markers to delete
+   - **Select Area**: Click and drag to select points in an area, then delete selected points
+4. Click "🧮 Calculate Encoded Polyline" to generate the polyline string
+5. Review the generated polyline
+6. Click "💾 Save to Database" to store the route
+
+#### Edit Existing Route
+1. Select a route from the dropdown
+2. Click "✏️ Edit Route"
+3. Add or remove points using the editing tools
+4. Generate and save the updated polyline
+
+### Map Interactions
+- **Zoom**: Use the +/- buttons or scroll wheel
+- **Pan**: Click and drag (disabled during area selection)
+- **Focus**: Click a trip's colored indicator to center the map on it
+- **Highlight Point**: Click a coordinate in the point list to highlight it on the map
+
+## 🗄️ Database Schema
+
+### `master_routes` Table
 ```sql
-- id (uuid)
-- route_number (text)
-- route_name (text)
-- origin_city (text)
-- destination_city (text)
-- total_distance_km (numeric)
-- estimated_duration_minutes (integer)
-- encoded_polyline (text)
-- is_active (boolean)
-- created_at (timestamp)
-- updated_at (timestamp)
+CREATE TABLE master_routes (
+  idx SERIAL PRIMARY KEY,
+  id UUID DEFAULT gen_random_uuid(),
+  route_number VARCHAR(50) NOT NULL,
+  route_name VARCHAR(255) NOT NULL,
+  origin_city VARCHAR(100),
+  destination_city VARCHAR(100),
+  total_distance_km VARCHAR(50),
+  estimated_duration_minutes INTEGER DEFAULT 210,
+  encoded_polyline VARCHAR(10000) NOT NULL,
+  is_active BOOLEAN DEFAULT true,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
 ```
 
-## Tech Stack
+### `current_locations` Table
+```sql
+CREATE TABLE current_locations (
+  trip_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  route_id UUID NOT NULL REFERENCES master_routes(id) ON DELETE CASCADE,
+  route_name VARCHAR(255) NOT NULL,
+  current_point_index INTEGER NOT NULL DEFAULT 0,
+  current_latitude DECIMAL(10, 8) NOT NULL,
+  current_longitude DECIMAL(11, 8) NOT NULL,
+  total_points INTEGER NOT NULL,
+  speed_multiplier INTEGER NOT NULL DEFAULT 1,
+  is_animating BOOLEAN NOT NULL DEFAULT false,
+  progress_percentage DECIMAL(5, 2) NOT NULL DEFAULT 0.00,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+```
 
-- **React 19** - UI framework
-- **TypeScript** - Type safety
-- **Vite** - Build tool
-- **Tailwind CSS** - Styling
-## How Ile Maps JavaScript API** - Map visualization
-- **Supabase** - Database and real-time data
-- **@googlemaps/polyline-codec** - Polyline decoding
+## 🛠️ Tech Stack
 
-## Build for Production
+- **React 19** - UI framework with hooks
+- **TypeScript** - Type safety and better developer experience
+- **Vite** - Fast build tool and dev server
+- **Leaflet** - Interactive map library
+- **React Leaflet** - React components for Leaflet
+- **OpenStreetMap** - Map tiles
+- **Supabase** - PostgreSQL database and real-time backend
+- **@googlemaps/polyline-codec** - Encoding/decoding polylines
+
+## 🎨 UI Components
+
+- Custom confirmation dialogs (no browser popups)
+- Responsive sidebar with trip management
+- Color-coded trip indicators
+- Real-time progress bars
+- Interactive map controls
+- Scrollable coordinate lists
+
+## 📦 Build for Production
 
 ```bash
 npm run build
@@ -88,6 +171,10 @@ npm run build
 
 The production-ready files will be in the `dist` directory.
 
-## License
+## 🤝 Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## 📄 License
 
 MIT
