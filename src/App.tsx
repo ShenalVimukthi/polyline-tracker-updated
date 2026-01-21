@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
-import { MapContainer, TileLayer, Polyline, CircleMarker, useMap, useMapEvents } from 'react-leaflet';
+import { useEffect, useState, useRef, useCallback, useMemo, memo } from 'react';
+import { MapContainer, TileLayer, Polyline, CircleMarker, useMap, useMapEvents, Marker } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
+import L from 'leaflet';
 import { supabase, type MasterRoute } from './lib/supabase';
 import { decodePolyline, encodePolyline, calculateTimePerPoint, formatDuration, type LatLng } from './lib/polylineUtils';
 
@@ -48,6 +49,96 @@ function MapBounds({ allPoints, disabled }: { allPoints: LatLng[], disabled: boo
   return null;
 }
 
+// Draggable marker component for move mode - memoized to prevent unnecessary re-renders
+const DraggableMarker = memo(({ 
+  position, 
+  index, 
+  isHighlighted, 
+  isSelected,
+  onDragStart,
+  onDrag,
+  onDragEnd,
+  onClick
+}: { 
+  position: LatLng;
+  index: number;
+  isHighlighted: boolean;
+  isSelected: boolean;
+  onDragStart: (index: number) => void;
+  onDrag: (lat: number, lng: number) => void;
+  onDragEnd: () => void;
+  onClick?: () => void;
+}) => {
+  const markerRef = useRef<L.Marker>(null);
+  const lastDragTime = useRef<number>(0);
+
+  useEffect(() => {
+    const marker = markerRef.current;
+    if (marker) {
+      const handleDragStart = () => {
+        onDragStart(index);
+      };
+      
+      const handleDrag = () => {
+        // Throttle drag events to every 16ms (~60fps)
+        const now = Date.now();
+        if (now - lastDragTime.current > 16) {
+          const pos = marker.getLatLng();
+          onDrag(pos.lat, pos.lng);
+          lastDragTime.current = now;
+        }
+      };
+      
+      const handleDragEnd = () => {
+        onDragEnd();
+      };
+      
+      marker.on('dragstart', handleDragStart);
+      marker.on('drag', handleDrag);
+      marker.on('dragend', handleDragEnd);
+      
+      return () => {
+        marker.off('dragstart', handleDragStart);
+        marker.off('drag', handleDrag);
+        marker.off('dragend', handleDragEnd);
+      };
+    }
+  }, [index, onDragStart, onDrag, onDragEnd]);
+
+  // Memoize the icon to avoid recreating it on every render
+  const customIcon = useMemo(() => {
+    const size = isHighlighted ? 30 : (isSelected ? 20 : 16);
+    const color = isHighlighted ? '#FCD34D' : (isSelected ? '#EF4444' : '#8B5CF6');
+    
+    return L.divIcon({
+      className: 'custom-marker',
+      html: `<div style="
+        width: ${size}px;
+        height: ${size}px;
+        background-color: ${color};
+        border: ${isHighlighted ? '4px' : (isSelected ? '3px' : '2px')} solid white;
+        border-radius: 50%;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+        cursor: move;
+      "></div>`,
+      iconSize: [size, size],
+      iconAnchor: [size / 2, size / 2],
+    });
+  }, [isHighlighted, isSelected]);
+
+  return (
+    <Marker
+      ref={markerRef}
+      position={[position.lat, position.lng]}
+      draggable={true}
+      icon={customIcon}
+      eventHandlers={{
+        click: onClick
+      }}
+    />
+  );
+});
+
 // Component to handle map click events for editing
 function MapClickHandler({ 
   isEditMode,
@@ -58,7 +149,7 @@ function MapClickHandler({
   onDragEnd
 }: { 
   isEditMode: boolean;
-  editModeType: 'add' | 'select';
+  editModeType: 'add' | 'select' | 'insert' | 'move';
   onMapClick: (lat: number, lng: number) => void;
   onDragStart: (lat: number, lng: number) => void;
   onDragMove: (lat: number, lng: number) => void;
@@ -83,7 +174,7 @@ function MapClickHandler({
       }
     },
     click: (e) => {
-      if (isEditMode && editModeType === 'add') {
+      if (isEditMode && (editModeType === 'add' || editModeType === 'insert')) {
         onMapClick(e.latlng.lat, e.latlng.lng);
       }
     },
@@ -245,13 +336,16 @@ function App() {
   const [showExitConfirmation, setShowExitConfirmation] = useState(false);
   const [showClearConfirmation, setShowClearConfirmation] = useState(false);
   const [generatedPolyline, setGeneratedPolyline] = useState<string>('');
-  const [editModeType, setEditModeType] = useState<'add' | 'select'>('add');
+  const [editModeType, setEditModeType] = useState<'add' | 'select' | 'insert' | 'move'>('add');
   const [isDragging, setIsDragging] = useState(false);
   const [dragStart, setDragStart] = useState<LatLng | null>(null);
   const [dragCurrent, setDragCurrent] = useState<LatLng | null>(null);
   const [selectedPointIndices, setSelectedPointIndices] = useState<Set<number>>(new Set());
   const [tripToDelete, setTripToDelete] = useState<string | null>(null);
   const [showBackConfirmation, setShowBackConfirmation] = useState(false);
+  const [draggingPointIndex, setDraggingPointIndex] = useState<number | null>(null);
+  const [tempDragPosition, setTempDragPosition] = useState<LatLng | null>(null);
+  const dragThrottleRef = useRef<number | null>(null);
 
   useEffect(() => {
     const fetchRoutes = async () => {
@@ -276,13 +370,17 @@ function App() {
     };
     fetchRoutes();
 
-    // Cleanup: stop all animations on unmount
+    // Cleanup: stop all animations on unmount and cancel any pending animation frames
     return () => {
       activeTrips.forEach(trip => {
         if (trip.intervalRef) {
           clearInterval(trip.intervalRef);
         }
       });
+      
+      if (dragThrottleRef.current) {
+        cancelAnimationFrame(dragThrottleRef.current);
+      }
     };
   }, []);
 
@@ -574,10 +672,88 @@ function App() {
   const handleMapClick = (lat: number, lng: number) => {
     if (!editableRoute) return;
     
-    setEditableRoute({
-      ...editableRoute,
-      points: [...editableRoute.points, { lat, lng }]
-    });
+    if (editModeType === 'insert' && editableRoute.points.length >= 2) {
+      // Find the nearest line segment to insert the point
+      let minDistance = Infinity;
+      let insertIndex = -1;
+      
+      for (let i = 0; i < editableRoute.points.length - 1; i++) {
+        const p1 = editableRoute.points[i];
+        const p2 = editableRoute.points[i + 1];
+        
+        // Calculate distance from point to line segment
+        const distance = distanceToSegment(
+          { lat, lng },
+          p1,
+          p2
+        );
+        
+        if (distance < minDistance) {
+          minDistance = distance;
+          insertIndex = i + 1; // Insert after point i
+        }
+      }
+      
+      if (insertIndex !== -1) {
+        const newPoints = [
+          ...editableRoute.points.slice(0, insertIndex),
+          { lat, lng },
+          ...editableRoute.points.slice(insertIndex)
+        ];
+        setEditableRoute({
+          ...editableRoute,
+          points: newPoints
+        });
+        setHighlightedPointIndex(insertIndex);
+      }
+    } else {
+      // Add mode - append to end
+      setEditableRoute({
+        ...editableRoute,
+        points: [...editableRoute.points, { lat, lng }]
+      });
+    }
+  };
+  
+  // Helper function to calculate distance from point to line segment
+  const distanceToSegment = (point: LatLng, segStart: LatLng, segEnd: LatLng): number => {
+    const x = point.lng;
+    const y = point.lat;
+    const x1 = segStart.lng;
+    const y1 = segStart.lat;
+    const x2 = segEnd.lng;
+    const y2 = segEnd.lat;
+    
+    const A = x - x1;
+    const B = y - y1;
+    const C = x2 - x1;
+    const D = y2 - y1;
+    
+    const dot = A * C + B * D;
+    const lenSq = C * C + D * D;
+    let param = -1;
+    
+    if (lenSq !== 0) {
+      param = dot / lenSq;
+    }
+    
+    let xx, yy;
+    
+    if (param < 0) {
+      xx = x1;
+      yy = y1;
+    } else if (param > 1) {
+      xx = x2;
+      yy = y2;
+    } else {
+      xx = x1 + param * C;
+      yy = y1 + param * D;
+    }
+    
+    const dx = x - xx;
+    const dy = y - yy;
+    
+    return Math.sqrt(dx * dx + dy * dy);
   };
 
   const handleDragStart = (lat: number, lng: number) => {
@@ -609,7 +785,7 @@ function App() {
     }
   };
 
-  const handleDragEnd = (lat: number, lng: number) => {
+  const handleDragEnd = () => {
     if (isDragging && dragStart) {
       setIsDragging(false);
       
@@ -640,7 +816,68 @@ function App() {
     setDragStart(null);
     setDragCurrent(null);
     setIsDragging(false);
+    setDraggingPointIndex(null);
+    setTempDragPosition(null);
+    
+    // Clean up any pending animation frames
+    if (dragThrottleRef.current) {
+      cancelAnimationFrame(dragThrottleRef.current);
+      dragThrottleRef.current = null;
+    }
   };
+
+  const handlePointDragStart = useCallback((index: number) => {
+    if (editModeType === 'move') {
+      setDraggingPointIndex(index);
+      setHighlightedPointIndex(index);
+      setTempDragPosition(null);
+    }
+  }, [editModeType]);
+
+  const handlePointDrag = useCallback((lat: number, lng: number) => {
+    if (editModeType === 'move' && draggingPointIndex !== null) {
+      // Use temporary position to avoid re-rendering the entire route
+      setTempDragPosition({ lat, lng });
+      
+      // Throttle the actual route update to reduce re-renders
+      if (dragThrottleRef.current) {
+        cancelAnimationFrame(dragThrottleRef.current);
+      }
+      
+      dragThrottleRef.current = requestAnimationFrame(() => {
+        if (editableRoute) {
+          const newPoints = [...editableRoute.points];
+          newPoints[draggingPointIndex] = { lat, lng };
+          setEditableRoute({
+            ...editableRoute,
+            points: newPoints
+          });
+        }
+      });
+    }
+  }, [editModeType, draggingPointIndex, editableRoute]);
+
+  const handlePointDragEnd = useCallback(() => {
+    if (editModeType === 'move' && tempDragPosition && draggingPointIndex !== null && editableRoute) {
+      // Final update with the last position
+      const newPoints = [...editableRoute.points];
+      newPoints[draggingPointIndex] = tempDragPosition;
+      setEditableRoute({
+        ...editableRoute,
+        points: newPoints
+      });
+      setDraggingPointIndex(null);
+      setTempDragPosition(null);
+      
+      if (dragThrottleRef.current) {
+        cancelAnimationFrame(dragThrottleRef.current);
+        dragThrottleRef.current = null;
+      }
+    } else if (editModeType === 'move') {
+      setDraggingPointIndex(null);
+      setTempDragPosition(null);
+    }
+  }, [editModeType, tempDragPosition, draggingPointIndex, editableRoute]);
 
   const deletePoint = (index: number) => {
     if (!editableRoute) return;
@@ -791,32 +1028,85 @@ function App() {
                 positions={editableRoute.points.map(p => [p.lat, p.lng] as [number, number])} 
                 pathOptions={{ color: '#8B5CF6', weight: 4, opacity: 0.8 }}
               />
-              {editableRoute.points.map((point, index) => {
-                const isSelected = selectedPointIndices.has(index);
-                const isHighlighted = highlightedPointIndex === index;
-                return (
-                  <CircleMarker
-                    key={`edit-${index}`}
-                    center={[point.lat, point.lng]}
-                    radius={isHighlighted ? 15 : (isSelected ? 10 : 8)}
-                    pathOptions={{
-                      fillColor: isHighlighted ? '#FCD34D' : (isSelected ? '#EF4444' : '#8B5CF6'),
-                      fillOpacity: isHighlighted ? 1 : (isSelected ? 0.9 : 0.8),
-                      color: '#FFFFFF',
-                      weight: isHighlighted ? 4 : (isSelected ? 3 : 2)
-                    }}
-                    eventHandlers={{
-                      click: () => {
-                        if (editModeType === 'add') {
-                          if (window.confirm(`Delete point ${index + 1}?`)) {
-                            deletePoint(index);
+              
+              {/* Render markers - use draggable markers in move mode */}
+              {editModeType === 'move' ? (
+                // Draggable markers for move mode
+                editableRoute.points.map((point, index) => {
+                  const isSelected = selectedPointIndices.has(index);
+                  const isHighlighted = highlightedPointIndex === index || draggingPointIndex === index;
+                  return (
+                    <DraggableMarker
+                      key={`drag-${index}`}
+                      position={point}
+                      index={index}
+                      isHighlighted={isHighlighted}
+                      isSelected={isSelected}
+                      onDragStart={handlePointDragStart}
+                      onDrag={handlePointDrag}
+                      onDragEnd={handlePointDragEnd}
+                      onClick={() => {
+                        setHighlightedPointIndex(index);
+                        focusOnPoint(index);
+                      }}
+                    />
+                  );
+                })
+              ) : (
+                // Regular circle markers for other modes
+                editableRoute.points.map((point, index) => {
+                  const isSelected = selectedPointIndices.has(index);
+                  const isHighlighted = highlightedPointIndex === index;
+                  return (
+                    <CircleMarker
+                      key={`edit-${index}`}
+                      center={[point.lat, point.lng]}
+                      radius={isHighlighted ? 15 : (isSelected ? 10 : 8)}
+                      pathOptions={{
+                        fillColor: isHighlighted ? '#FCD34D' : (isSelected ? '#EF4444' : '#8B5CF6'),
+                        fillOpacity: isHighlighted ? 1 : (isSelected ? 0.9 : 0.8),
+                        color: '#FFFFFF',
+                        weight: isHighlighted ? 4 : (isSelected ? 3 : 2)
+                      }}
+                      eventHandlers={{
+                        click: () => {
+                          if (editModeType === 'add') {
+                            if (window.confirm(`Delete point ${index + 1}?`)) {
+                              deletePoint(index);
+                            }
                           }
                         }
-                      }
-                    }}
-                  />
-                );
-              })}
+                      }}
+                    />
+                  );
+                })
+              )}
+              
+              {/* Show midpoint markers in insert mode */}
+              {editModeType === 'insert' && editableRoute.points.length >= 2 && (
+                <>
+                  {editableRoute.points.slice(0, -1).map((point, index) => {
+                    const nextPoint = editableRoute.points[index + 1];
+                    const midLat = (point.lat + nextPoint.lat) / 2;
+                    const midLng = (point.lng + nextPoint.lng) / 2;
+                    
+                    return (
+                      <CircleMarker
+                        key={`midpoint-${index}`}
+                        center={[midLat, midLng]}
+                        radius={6}
+                        pathOptions={{
+                          fillColor: '#10B981',
+                          fillOpacity: 0.6,
+                          color: '#FFFFFF',
+                          weight: 2,
+                          dashArray: '3, 3'
+                        }}
+                      />
+                    );
+                  })}
+                </>
+              )}
               
               {/* Selection box during drag */}
               {dragStart && dragCurrent && (
@@ -1042,18 +1332,17 @@ function App() {
                 </p>
                 
                 {/* Edit Mode Toggle Buttons */}
-                <div style={{ marginBottom: '12px', display: 'flex', gap: '8px' }}>
+                <div style={{ marginBottom: '12px', display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '8px' }}>
                   <button
                     onClick={() => {
                       setEditModeType('add');
                       clearSelection();
                     }}
                     style={{
-                      flex: 1,
                       padding: '10px',
                       borderRadius: '6px',
                       fontWeight: '600',
-                      fontSize: '13px',
+                      fontSize: '12px',
                       color: editModeType === 'add' ? 'white' : '#374151',
                       backgroundColor: editModeType === 'add' ? '#8B5CF6' : 'white',
                       border: `2px solid ${editModeType === 'add' ? '#8B5CF6' : '#e5e7eb'}`,
@@ -1065,15 +1354,52 @@ function App() {
                   </button>
                   <button
                     onClick={() => {
+                      setEditModeType('insert');
+                      clearSelection();
+                    }}
+                    style={{
+                      padding: '10px',
+                      borderRadius: '6px',
+                      fontWeight: '600',
+                      fontSize: '12px',
+                      color: editModeType === 'insert' ? 'white' : '#374151',
+                      backgroundColor: editModeType === 'insert' ? '#8B5CF6' : 'white',
+                      border: `2px solid ${editModeType === 'insert' ? '#8B5CF6' : '#e5e7eb'}`,
+                      cursor: 'pointer',
+                      transition: 'all 0.2s ease'
+                    }}
+                  >
+                    ➕➖ Insert
+                  </button>
+                  <button
+                    onClick={() => {
+                      setEditModeType('move');
+                      clearSelection();
+                    }}
+                    style={{
+                      padding: '10px',
+                      borderRadius: '6px',
+                      fontWeight: '600',
+                      fontSize: '12px',
+                      color: editModeType === 'move' ? 'white' : '#374151',
+                      backgroundColor: editModeType === 'move' ? '#8B5CF6' : 'white',
+                      border: `2px solid ${editModeType === 'move' ? '#8B5CF6' : '#e5e7eb'}`,
+                      cursor: 'pointer',
+                      transition: 'all 0.2s ease'
+                    }}
+                  >
+                    ✋ Move Points
+                  </button>
+                  <button
+                    onClick={() => {
                       setEditModeType('select');
                       clearSelection();
                     }}
                     style={{
-                      flex: 1,
                       padding: '10px',
                       borderRadius: '6px',
                       fontWeight: '600',
-                      fontSize: '13px',
+                      fontSize: '12px',
                       color: editModeType === 'select' ? 'white' : '#374151',
                       backgroundColor: editModeType === 'select' ? '#8B5CF6' : 'white',
                       border: `2px solid ${editModeType === 'select' ? '#8B5CF6' : '#e5e7eb'}`,
@@ -1097,6 +1423,10 @@ function App() {
                   <p style={{ fontSize: '12px', color: '#6b7280' }}>
                     💡 {editModeType === 'add' 
                       ? 'Click on map to add points. Click markers to delete.' 
+                      : editModeType === 'insert'
+                      ? 'Click on map near a line segment to insert a point between existing points. Green dots show midpoints.'
+                      : editModeType === 'move'
+                      ? 'Drag markers to reposition points. Click markers to highlight and view on map.'
                       : 'Click and drag on the map to select points in an area.'}
                   </p>
                   {selectedPointIndices.size > 0 && (
