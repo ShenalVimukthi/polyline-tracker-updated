@@ -397,6 +397,9 @@ function App() {
   const [coordinateLatInput, setCoordinateLatInput] = useState("");
   const [coordinateLngInput, setCoordinateLngInput] = useState("");
   const [coordinateInputError, setCoordinateInputError] = useState("");
+  const [cityInput, setCityInput] = useState("");
+  const [cityInputError, setCityInputError] = useState("");
+  const [isCitySearchLoading, setIsCitySearchLoading] = useState(false);
   const dragThrottleRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -691,6 +694,9 @@ function App() {
     setCoordinateLatInput("");
     setCoordinateLngInput("");
     setCoordinateInputError("");
+    setCityInput("");
+    setCityInputError("");
+    setIsCitySearchLoading(false);
     setIsManualFocus(false);
     setMapCenter(null);
     setIsEditMode(false);
@@ -709,6 +715,7 @@ function App() {
       isNewRoute: true,
     });
     setCoordinateInputError("");
+    setCityInputError("");
   };
 
   const startEditExistingRoute = () => {
@@ -733,6 +740,105 @@ function App() {
       isNewRoute: false,
     });
     setCoordinateInputError("");
+    setCityInputError("");
+  };
+
+  interface NominatimResult {
+    lat: string;
+    lon: string;
+    name?: string;
+    display_name?: string;
+    address?: {
+      city?: string;
+      town?: string;
+      village?: string;
+      municipality?: string;
+      state_district?: string;
+      county?: string;
+    };
+  }
+
+  const normalizeText = (value: string) =>
+    value.trim().toLowerCase().replace(/\s+/g, " ");
+
+  const resolveCityCoordinates = async (
+    cityName: string,
+  ): Promise<LatLng | null> => {
+    const normalizedCity = normalizeText(cityName);
+
+    if (!normalizedCity) {
+      setCityInputError("Enter a city name.");
+      return null;
+    }
+
+    try {
+      setIsCitySearchLoading(true);
+      setCityInputError("");
+
+      const endpoint = `https://nominatim.openstreetmap.org/search?city=${encodeURIComponent(
+        cityName.trim(),
+      )}&format=json&addressdetails=1&limit=10`;
+
+      const response = await fetch(endpoint, {
+        headers: {
+          Accept: "application/json",
+        },
+      });
+
+      if (!response.ok) {
+        setCityInputError("City lookup failed. Please try again.");
+        return null;
+      }
+
+      const results = (await response.json()) as NominatimResult[];
+
+      if (!Array.isArray(results) || results.length === 0) {
+        setCityInputError(
+          `No exact city match found for "${cityName.trim()}".`,
+        );
+        return null;
+      }
+
+      const exactMatch = results.find((result) => {
+        const candidateNames = [
+          result.name,
+          result.display_name?.split(",")[0],
+          result.address?.city,
+          result.address?.town,
+          result.address?.village,
+          result.address?.municipality,
+          result.address?.state_district,
+          result.address?.county,
+        ]
+          .filter((name): name is string => Boolean(name))
+          .map((name) => normalizeText(name));
+
+        return candidateNames.includes(normalizedCity);
+      });
+
+      if (!exactMatch) {
+        setCityInputError(
+          `No exact city match found for "${cityName.trim()}".`,
+        );
+        return null;
+      }
+
+      const lat = Number(exactMatch.lat);
+      const lng = Number(exactMatch.lon);
+
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+        setCityInputError("City lookup returned invalid coordinates.");
+        return null;
+      }
+
+      setCityInputError("");
+      return { lat, lng };
+    } catch {
+      setCityInputError("Unable to search city right now. Please try again.");
+      return null;
+    } finally {
+      setIsCitySearchLoading(false);
+    }
   };
 
   const validateCoordinateInputs = (): LatLng | null => {
@@ -815,6 +921,29 @@ function App() {
     const coordinates = validateCoordinateInputs();
     if (!coordinates) return;
     if (!editableRoute) return;
+
+    const addedIndex = addPointToEditableRoute(
+      coordinates.lat,
+      coordinates.lng,
+    );
+    if (addedIndex !== null) {
+      setMapCenter([coordinates.lat, coordinates.lng]);
+      setIsManualFocus(true);
+      setHighlightedPointIndex(addedIndex);
+    }
+  };
+
+  const handleCitySearch = async () => {
+    const coordinates = await resolveCityCoordinates(cityInput);
+    if (!coordinates) return;
+
+    setMapCenter([coordinates.lat, coordinates.lng]);
+    setIsManualFocus(true);
+  };
+
+  const handleAddPointFromCity = async () => {
+    const coordinates = await resolveCityCoordinates(cityInput);
+    if (!coordinates || !editableRoute) return;
 
     const addedIndex = addPointToEditableRoute(
       coordinates.lat,
@@ -1899,6 +2028,115 @@ function App() {
                   >
                     Added points are included in the route line and encoded
                     polyline calculation.
+                  </p>
+                </div>
+
+                <div
+                  style={{
+                    marginBottom: "12px",
+                    padding: "12px",
+                    backgroundColor: "white",
+                    borderRadius: "6px",
+                    border: "2px solid #dbeafe",
+                  }}
+                >
+                  <p
+                    style={{
+                      fontSize: "13px",
+                      fontWeight: "700",
+                      color: "#1d4ed8",
+                      marginBottom: "10px",
+                    }}
+                  >
+                    🏙️ Search / Add by City Name
+                  </p>
+                  <input
+                    type="text"
+                    placeholder="City name (exact, e.g. Colombo)"
+                    value={cityInput}
+                    onChange={(e) => setCityInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        void handleCitySearch();
+                      }
+                    }}
+                    style={{
+                      width: "100%",
+                      padding: "8px",
+                      borderRadius: "6px",
+                      border: "1px solid #d1d5db",
+                      fontSize: "12px",
+                      color: "#111827",
+                      marginBottom: "8px",
+                    }}
+                  />
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "1fr 1fr",
+                      gap: "8px",
+                    }}
+                  >
+                    <button
+                      onClick={() => {
+                        void handleCitySearch();
+                      }}
+                      disabled={isCitySearchLoading}
+                      style={{
+                        padding: "8px",
+                        borderRadius: "6px",
+                        fontWeight: "600",
+                        fontSize: "12px",
+                        color: "#1d4ed8",
+                        backgroundColor: "#eff6ff",
+                        border: "1px solid #bfdbfe",
+                        cursor: isCitySearchLoading ? "not-allowed" : "pointer",
+                        opacity: isCitySearchLoading ? 0.7 : 1,
+                      }}
+                    >
+                      {isCitySearchLoading ? "⏳ Searching..." : "🔍 Find City"}
+                    </button>
+                    <button
+                      onClick={() => {
+                        void handleAddPointFromCity();
+                      }}
+                      disabled={isCitySearchLoading}
+                      style={{
+                        padding: "8px",
+                        borderRadius: "6px",
+                        fontWeight: "600",
+                        fontSize: "12px",
+                        color: "white",
+                        backgroundColor: "#2563eb",
+                        border: "none",
+                        cursor: isCitySearchLoading ? "not-allowed" : "pointer",
+                        opacity: isCitySearchLoading ? 0.7 : 1,
+                      }}
+                    >
+                      📌 Add City Point
+                    </button>
+                  </div>
+                  {cityInputError && (
+                    <p
+                      style={{
+                        marginTop: "8px",
+                        fontSize: "12px",
+                        color: "#dc2626",
+                      }}
+                    >
+                      {cityInputError}
+                    </p>
+                  )}
+                  <p
+                    style={{
+                      marginTop: "8px",
+                      fontSize: "11px",
+                      color: "#6b7280",
+                    }}
+                  >
+                    Uses exact city-name matching. Found city coordinates can be
+                    added directly to the route.
                   </p>
                 </div>
 
